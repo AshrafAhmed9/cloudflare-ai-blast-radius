@@ -29,10 +29,20 @@ jobs:
         run: npm test
 
       - name: CLI smoke test against all bundled sample plans
+        # `npm run cli` intentionally exits non-zero on a high-severity
+        # finding (see src/cli.ts). Under bash -e (GitHub Actions' default),
+        # a bare non-zero exit aborts the step before the check below it
+        # runs — so each call uses the `cmd && code=0 || code=$?` idiom to
+        # capture the real exit code without tripping -e itself.
         run: |
-          npm run cli -- ui/samples/replace-db.json; test $? -eq 1
-          npm run cli -- ui/samples/ordinary-update.json; test $? -eq 0
-          npm run cli -- ui/samples/incomplete-evidence.json; test $? -eq 0
+          npm run cli -- ui/samples/replace-db.json && code=0 || code=$?
+          test "$code" -eq 1
+
+          npm run cli -- ui/samples/ordinary-update.json && code=0 || code=$?
+          test "$code" -eq 0
+
+          npm run cli -- ui/samples/incomplete-evidence.json && code=0 || code=$?
+          test "$code" -eq 0
 
       - name: Production build (no deploy — no credentials in CI)
         run: npx wrangler deploy --dry-run --outdir dist
