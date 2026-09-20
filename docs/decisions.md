@@ -30,18 +30,46 @@ satisfies the stated "workflow / coordination" requirement on its own. If chat
 grows into a multi-call chain (e.g., the policy compiler's compile → dry-run →
 confirm sequence), that's the point a Workflow would earn its keep.
 
-## Why the policy compiler (English → executable rule) was cut from this pass
+## The policy compiler (English → executable rule)
 
-This was the most distinctive idea in earlier drafts of this plan, and it's
-explicitly still the "full submission target." It was cut from the initial
-working slice for one reason: it is the single highest-risk piece to get
-right (constrained DSL, three-valued logic, confirm-before-persist lifecycle,
-held-out evaluation) and the plan's own stop rule says to cut the compiler and
-its evaluation together rather than ship a compiler without evaluation. The
-rest of the submission — parser, rules, graph, chat, persistent memory,
-CLI — is complete, tested, and honest about its limits. The compiler is the
-next thing to build if there's more time before submission; it is not silently
-dropped, it's sequenced.
+Built, unit-tested (22 tests across `test/policy-interpret.test.ts`,
+`test/policy-compile.test.ts`, `test/policy-hash.test.ts`), and wired into
+`agent.ts` and the UI. Not live-verified against the real Workers AI API for
+the same credential reason as chat — see the section below.
+
+Design: `src/policies/types.ts` defines a fixed, small DSL (a resourceType
+allowlist, an action allowlist, one optional attribute predicate, a
+severity) — never generated code or `eval`. `interpret.ts` is a pure,
+three-valued evaluator (match/no-match/**unknown**, tested explicitly for
+the case where a replacement's cause is itself unavailable — see the "is
+UNKNOWN — not no-match" test). `compile.ts` turns one English sentence into
+that DSL via Workers AI, Zod-validates the output, retries once on
+malformed JSON (a real bug was caught and fixed here: a JSON parse failure
+was initially treated as a fatal error rather than a retryable one — see
+`test/policy-compile.test.ts`'s "retries once" case), and refuses cleanly
+when the sentence can't be expressed in the DSL.
+
+Lifecycle, per PLAN.md §6 (propose → validate → preview → confirm →
+persist): `POST /policy/propose` compiles and dry-runs against the selected
+review **without persisting anything**; the client gets back a
+`proposalHash` — a SHA-256 of the exact (sentence, rule) pair
+(`hash.ts`, tested for determinism and for changing when either input
+changes). `POST /policy/confirm` recomputes that hash server-side from what
+the client sends back; a mismatch (the proposal was edited after preview)
+is rejected with 409, not silently accepted. Confirming the same proposal
+twice is idempotent (returns the existing stored policy rather than
+duplicating).
+
+**Snapshot, not live recomputation.** A review's policy findings are
+computed once, against the policies that existed at review-creation time,
+and stored alongside the review (`policy_findings_json`,
+`policy_revision_json` columns). Re-opening an old review later shows the
+same findings even if new policies were added since — otherwise adding a
+policy would retroactively rewrite history, which contradicts PLAN.md §5's
+"snapshot policies at review creation" requirement and the reproducibility
+requirement in §11. Demo: submit a review, add a policy, submit the *same*
+plan again as a new review — the new one shows the policy finding citing
+your sentence; the first one doesn't change.
 
 ## Why graph resolution is intentionally partial
 

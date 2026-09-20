@@ -62,10 +62,16 @@ function severityBadge(sev) {
   return `<span class="badge ${sev}">${sev}</span>`;
 }
 
-function renderReport(result) {
+function renderReport(result, policyFindings) {
   if (!result) {
     el.report.innerHTML = `<div class="empty-state">No review selected yet.</div>`;
     return;
+  }
+  const policyByResource = new Map();
+  for (const pf of policyFindings ?? []) {
+    const list = policyByResource.get(pf.resourceId) ?? [];
+    list.push(pf);
+    policyByResource.set(pf.resourceId, list);
   }
   if (result.facts.length === 0) {
     el.report.innerHTML = `<div class="empty-state">Plan parsed successfully — no resource changes present.</div>`;
@@ -103,6 +109,7 @@ function renderReport(result) {
         ${fact.replacePaths.map((p) => `<div class="evidence">replace_path: ${escapeHtml(p.path)}</div>`).join("")}
         ${findings.map((f) => `<div class="finding">${severityBadge(f.severity)} ${escapeHtml(f.message)} <span class="evidence">(rule=${escapeHtml(f.ruleId)})</span></div>`).join("")}
         ${deps.length ? `<div class="evidence">referenced by: ${deps.map((d) => `${escapeHtml(d.resourceId)} (${d.relationship})`).join(", ")}</div>` : ""}
+        ${(policyByResource.get(fact.id) ?? []).map((pf) => `<div class="finding">${severityBadge(pf.result === "unknown" ? "notable" : pf.severity)} policy "${escapeHtml(pf.sentence)}" → ${escapeHtml(pf.result)}</div>`).join("")}
       </div>
     `);
   }
@@ -157,11 +164,11 @@ async function selectReview(reviewId) {
     const res = await fetch(`${AGENT_HTTP_BASE}/review/${encodeURIComponent(reviewId)}`);
     if (!res.ok) return;
     const data = await res.json();
-    cache = { result: data.result, messages: data.messages ?? [] };
+    cache = { result: data.result, messages: data.messages ?? [], policyFindings: data.policyFindings ?? [] };
     reviewCache.set(reviewId, cache);
   }
   activeResult = cache.result;
-  renderReport(activeResult);
+  renderReport(activeResult, cache.policyFindings);
   el.chatLog.innerHTML = "";
   el.chatEmpty.hidden = cache.messages.length > 0;
   if (cache.messages.length === 0) el.chatLog.appendChild(el.chatEmpty);
@@ -194,7 +201,7 @@ async function submitPlan(planText, label) {
       return;
     }
     el.submitStatus.textContent = "Done.";
-    reviewCache.set(data.reviewId, { result: data.result, messages: [] });
+    reviewCache.set(data.reviewId, { result: data.result, messages: [], policyFindings: data.policyFindings ?? [] });
     await selectReview(data.reviewId);
   } catch (err) {
     el.submitStatus.textContent = `Network error: ${err.message}`;
@@ -222,6 +229,76 @@ document.querySelectorAll("button[data-sample]").forEach((btn) => {
     await submitPlan(text, btn.textContent);
   });
 });
+
+// --- Policies ---
+
+let pendingProposal = null;
+
+el.policyProposeBtn = document.getElementById("policyProposeBtn");
+el.policyInput = document.getElementById("policyInput");
+el.policyProposal = document.getElementById("policyProposal");
+el.policyList = document.getElementById("policyList");
+
+async function loadPolicies() {
+  const res = await fetch(`${AGENT_HTTP_BASE}/policies`);
+  if (!res.ok) return;
+  const data = await res.json();
+  el.policyList.innerHTML = data.policies.length === 0
+    ? `<div class="status">No saved policies yet.</div>`
+    : data.policies.map((p) => `
+        <div class="resource">
+          <div>"${escapeHtml(p.sentence)}"</div>
+          <div class="evidence">${escapeHtml(JSON.stringify(p.rule))}</div>
+          <button data-delete-policy="${p.id}" style="margin-top:6px;">Delete</button>
+        </div>
+      `).join("");
+  el.policyList.querySelectorAll("[data-delete-policy]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await fetch(`${AGENT_HTTP_BASE}/policies/${btn.getAttribute("data-delete-policy")}`, { method: "DELETE" });
+      loadPolicies();
+    });
+  });
+}
+
+el.policyProposeBtn.addEventListener("click", async () => {
+  const sentence = el.policyInput.value.trim();
+  if (!sentence) return;
+  el.policyProposal.innerHTML = `<div class="status">Compiling…</div>`;
+  const res = await fetch(`${AGENT_HTTP_BASE}/policy/propose`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ sentence, reviewId: activeReviewId }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    el.policyProposal.innerHTML = `<div class="finding" style="border-color:var(--high)">Refused: ${escapeHtml(data.reason ?? "unknown error")}</div>`;
+    pendingProposal = null;
+    return;
+  }
+  pendingProposal = data;
+  const matchCount = data.dryRun.filter((d) => d.result === "match").length;
+  const unknownCount = data.dryRun.filter((d) => d.result === "unknown").length;
+  el.policyProposal.innerHTML = `
+    <div class="resource">
+      <div class="evidence">${escapeHtml(JSON.stringify(data.rule))}</div>
+      <div style="margin-top:6px;">Against the selected review: ${matchCount} match, ${unknownCount} unknown.</div>
+      <button id="policyConfirmBtn" class="primary" style="margin-top:8px;">Confirm and save</button>
+    </div>`;
+  document.getElementById("policyConfirmBtn").addEventListener("click", async () => {
+    if (!pendingProposal) return;
+    await fetch(`${AGENT_HTTP_BASE}/policy/confirm`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sentence: pendingProposal.sentence, rule: pendingProposal.rule, proposalHash: pendingProposal.proposalHash }),
+    });
+    el.policyProposal.innerHTML = `<div class="status">Saved. Applies to reviews submitted from now on.</div>`;
+    el.policyInput.value = "";
+    pendingProposal = null;
+    loadPolicies();
+  });
+});
+
+loadPolicies();
 
 el.chatForm.addEventListener("submit", (e) => {
   e.preventDefault();

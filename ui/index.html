@@ -97,6 +97,17 @@
     </section>
 
     <section class="panel">
+      <h2 style="margin-top:0; font-size:15px;">Policies</h2>
+      <p class="status" style="margin-top:0;">Teach a rule in plain English. It's compiled, previewed against the selected review, and only saved after you confirm — then it applies to every review submitted after that.</p>
+      <div class="row">
+        <input id="policyInput" type="text" placeholder='e.g. "Flag deletion or replacement of database instances"' style="flex:1; padding:8px 10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); font:inherit;" />
+        <button id="policyProposeBtn">Propose</button>
+      </div>
+      <div id="policyProposal"></div>
+      <div id="policyList" style="margin-top:10px;"></div>
+    </section>
+
+    <section class="panel">
       <h2 style="margin-top:0; font-size:15px;">Chat</h2>
       <div id="chatLog"><div class="empty-state" id="chatEmpty">Select a review to chat about it.</div></div>
       <form class="chatForm" id="chatForm">

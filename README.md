@@ -38,6 +38,20 @@ production policy engine, and OPA already does plan-level policy evaluation.
 What this adds is an evidence-linked explanation and conversational review on
 top of the same plan JSON.
 
+## The distinctive part: teach it a policy in English
+
+Beyond reviewing a plan against the built-in rule pack, you can type a
+sentence like *"Flag deletion or replacement of database instances"* into
+the Policies panel. It's compiled into a small typed rule (never generated
+code — see `src/policies/types.ts`), previewed against the currently
+selected plan so you see exactly which resources it would flag before it's
+saved, and only persisted after you confirm. From then on, every review
+submitted in that workspace is checked against it too, citing your own
+sentence in the finding. A review's policy findings are snapshotted at
+creation time — adding a policy later doesn't retroactively change an
+earlier review's findings. See `docs/decisions.md` for the full lifecycle
+(propose → dry-run → hash-bound confirm → persist) and why that matters.
+
 ## Requirements mapping
 
 | Requirement | Implementation | Where |
@@ -109,8 +123,10 @@ first) and can never change a finding — see `docs/decisions.md`.
 
 Offline, deterministic, reproduced by `npm test`:
 
-- **33 unit tests, 0 failures** — parser (8), analyze orchestrator (7),
-  reference graph (6), sanitize/redaction (6), AI context/verify (6).
+- **55 unit tests, 0 failures** — parser (8), analyze orchestrator (7),
+  reference graph (6), sanitize/redaction (6), AI context/verify (6), policy
+  interpreter's three-valued logic (11), policy compiler including a real
+  bug it caught (7), proposal-hash binding (4).
 - All three sample plans (`ui/samples/*.json`) produce the exact output shown
   at the top of this README and in [`docs/limitations.md`](docs/limitations.md).
 
@@ -146,9 +162,9 @@ Honest, as of this commit:
   Workers AI response, the WebSocket chat flow in a browser, or an actual
   `wrangler deploy` — those need Cloudflare credentials not available in
   this build environment.
-- **Not built:** the D1-backed policy compiler, `bench/` accuracy
-  measurement, a delete-workspace endpoint. See `docs/decisions.md` for the
-  reasoning behind each cut.
+- **Not built:** `bench/` accuracy measurement against a larger real-plan
+  corpus, a delete-workspace endpoint. See `docs/decisions.md` and
+  `docs/limitations.md` for the reasoning behind each cut.
 
 ## Repository layout
 
@@ -162,6 +178,7 @@ src/agent.ts           ReviewAgent: state, HTTP, WebSocket chat
 src/cli.ts             local CLI over the same core
 src/core/               parse, sanitize, rules, graph, analyze — pure TS, no network
 src/ai/                 context building, Workers AI call, grounding verifier
+src/policies/           policy DSL, three-valued interpreter, English-to-rule compiler, proposal hashing
 ui/                     browser client (plain HTML/CSS/JS) + sample plans
 test/                   33 offline unit tests (vitest)
 docs/decisions.md       the actual tradeoffs and why

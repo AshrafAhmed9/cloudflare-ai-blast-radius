@@ -9,11 +9,16 @@ import { analyzePlan } from "./core/analyze.js";
 import { PlanParseError } from "./core/parse.js";
 import type { AnalysisResult } from "./core/types.js";
 import { askAboutReview, summarizeReview } from "./ai/chat.js";
+import { compilePolicy } from "./policies/compile.js";
+import { proposalHash } from "./policies/hash.js";
+import { evaluatePolicyAgainstFacts } from "./policies/interpret.js";
+import { PolicyRuleSchema, type PolicyFinding, type PolicyRule, type StoredPolicy } from "./policies/types.js";
 
 const MAX_INPUT_BYTES = 1_048_576; // 1 MiB, per PLAN.md §7
 const MAX_CHANGED_RESOURCES = 200;
 const MAX_RETAINED_REVIEWS = 20;
 const MAX_CHAT_MESSAGE_CHARS = 2000;
+const MAX_RETAINED_POLICIES = 30;
 
 export interface ReviewSummary {
   id: string;
@@ -34,6 +39,16 @@ interface ReviewRow {
   created_at: string;
   label: string;
   result_json: string;
+  policy_findings_json: string;
+  policy_revision_json: string;
+}
+
+interface PolicyRow {
+  id: string;
+  sentence: string;
+  rule_json: string;
+  created_at: string;
+  proposal_hash: string;
 }
 
 interface MessageRow {
@@ -62,7 +77,9 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       id TEXT PRIMARY KEY,
       created_at TEXT NOT NULL,
       label TEXT NOT NULL,
-      result_json TEXT NOT NULL
+      result_json TEXT NOT NULL,
+      policy_findings_json TEXT NOT NULL DEFAULT '[]',
+      policy_revision_json TEXT NOT NULL DEFAULT '[]'
     )`;
     this.sql`CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -70,6 +87,13 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       role TEXT NOT NULL,
       content TEXT NOT NULL,
       created_at TEXT NOT NULL
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS policies (
+      id TEXT PRIMARY KEY,
+      sentence TEXT NOT NULL,
+      rule_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      proposal_hash TEXT NOT NULL
     )`;
   }
 
@@ -82,6 +106,44 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     const row = rows[0];
     if (!row) return null;
     return JSON.parse(row.result_json) as AnalysisResult;
+  }
+
+  /** Full row including the policy findings snapshotted at review-creation
+   *  time — deliberately NOT recomputed against the current policy set on
+   *  every read, so a review's findings stay reproducible even after the
+   *  workspace's policies change later (PLAN.md §5: "Snapshot policies at
+   *  review creation so concurrent policy changes cannot alter a running
+   *  review"). */
+  private getReviewRow(reviewId: string): ReviewRow | null {
+    const rows = this.sql<ReviewRow>`SELECT * FROM reviews WHERE id = ${reviewId}`;
+    return rows[0] ?? null;
+  }
+
+  private listPolicies(): StoredPolicy[] {
+    const rows = this.sql<PolicyRow>`SELECT * FROM policies ORDER BY created_at ASC`;
+    return rows.map((r) => ({
+      id: r.id,
+      sentence: r.sentence,
+      rule: JSON.parse(r.rule_json) as PolicyRule,
+      createdAt: r.created_at,
+      proposalHash: r.proposal_hash,
+    }));
+  }
+
+  /** Evaluates every currently stored policy against a set of facts. Used
+   *  both for the propose-time dry run (against the currently active
+   *  review, not persisted) and at review-creation time (persisted as a
+   *  snapshot — see getReviewRow's comment). */
+  private evaluateStoredPolicies(facts: AnalysisResult["facts"]): { findings: PolicyFinding[]; revision: string[] } {
+    const policies = this.listPolicies();
+    const findings: PolicyFinding[] = [];
+    for (const p of policies) {
+      const matches = evaluatePolicyAgainstFacts(p.rule, facts);
+      for (const m of matches) {
+        findings.push({ policyId: p.id, sentence: p.sentence, resourceId: m.resourceId, result: m.result, severity: p.rule.severity });
+      }
+    }
+    return { findings, revision: policies.map((p) => p.id) };
   }
 
   private syncSummaryState() {
@@ -124,9 +186,14 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     }
 
     const idempotencyKey = typeof body.idempotencyKey === "string" && body.idempotencyKey ? body.idempotencyKey : crypto.randomUUID();
-    const existing = this.getReviewResult(idempotencyKey);
-    if (existing) {
-      return Response.json({ reviewId: idempotencyKey, result: existing, deduped: true });
+    const existingRow = this.getReviewRow(idempotencyKey);
+    if (existingRow) {
+      return Response.json({
+        reviewId: idempotencyKey,
+        result: JSON.parse(existingRow.result_json),
+        policyFindings: JSON.parse(existingRow.policy_findings_json),
+        deduped: true,
+      });
     }
 
     let result: AnalysisResult;
@@ -150,7 +217,10 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     const label = typeof body.label === "string" && body.label ? body.label : `Review ${new Date().toISOString()}`;
     const createdAt = new Date().toISOString();
 
-    this.sql`INSERT INTO reviews (id, created_at, label, result_json) VALUES (${reviewId}, ${createdAt}, ${label}, ${JSON.stringify(result)})`;
+    const { findings: policyFindings, revision: policyRevision } = this.evaluateStoredPolicies(result.facts);
+
+    this.sql`INSERT INTO reviews (id, created_at, label, result_json, policy_findings_json, policy_revision_json)
+      VALUES (${reviewId}, ${createdAt}, ${label}, ${JSON.stringify(result)}, ${JSON.stringify(policyFindings)}, ${JSON.stringify(policyRevision)})`;
 
     // Evict oldest reviews beyond the retention limit for this workspace.
     const all = this.sql<{ id: string }>`SELECT id FROM reviews ORDER BY created_at DESC`;
@@ -167,7 +237,7 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     // call never blocks or removes findings.
     this.enrichWithSummary(reviewId, result).catch(() => {});
 
-    return Response.json({ reviewId, result, deduped: false });
+    return Response.json({ reviewId, result, policyFindings, deduped: false });
   }
 
   private async enrichWithSummary(reviewId: string, result: AnalysisResult) {
@@ -183,10 +253,102 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
   }
 
   private handleGetReview(reviewId: string): Response {
-    const result = this.getReviewResult(reviewId);
-    if (!result) return Response.json({ error: "Review not found in this workspace." }, { status: 404 });
+    const row = this.getReviewRow(reviewId);
+    if (!row) return Response.json({ error: "Review not found in this workspace." }, { status: 404 });
     const messages = this.sql<MessageRow>`SELECT * FROM messages WHERE review_id = ${reviewId} ORDER BY created_at ASC`;
-    return Response.json({ reviewId, result, messages });
+    return Response.json({
+      reviewId,
+      result: JSON.parse(row.result_json),
+      policyFindings: JSON.parse(row.policy_findings_json),
+      policyRevision: JSON.parse(row.policy_revision_json),
+      messages,
+    });
+  }
+
+  /** POST /policy/propose { sentence, reviewId? } — compiles and dry-runs a
+   *  candidate policy WITHOUT persisting it. Returns a proposalHash the
+   *  client must echo back unchanged to /policy/confirm. */
+  private async handlePolicyPropose(request: Request): Promise<Response> {
+    let body: { sentence?: string; reviewId?: string };
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "Request body must be JSON: { sentence, reviewId? }." }, { status: 400 });
+    }
+    if (typeof body.sentence !== "string" || !body.sentence.trim()) {
+      return Response.json({ error: "sentence is required." }, { status: 400 });
+    }
+
+    const compiled = await compilePolicy(this.env.AI, body.sentence);
+    if (!compiled.ok) {
+      return Response.json({ ok: false, reason: compiled.reason });
+    }
+
+    const hash = await proposalHash(body.sentence, compiled.rule);
+
+    let dryRun: { resourceId: string; result: string }[] = [];
+    const targetReviewId = body.reviewId ?? this.state.activeReviewId ?? undefined;
+    if (targetReviewId) {
+      const result = this.getReviewResult(targetReviewId);
+      if (result) dryRun = evaluatePolicyAgainstFacts(compiled.rule, result.facts);
+    }
+
+    return Response.json({ ok: true, sentence: body.sentence, rule: compiled.rule, proposalHash: hash, dryRun });
+  }
+
+  /** POST /policy/confirm { sentence, rule, proposalHash } — persists only
+   *  if the recomputed hash matches, so an edited proposal can't reuse an
+   *  earlier approval (PLAN.md §6). Idempotent on proposalHash: confirming
+   *  the same proposal twice returns the existing stored policy. */
+  private async handlePolicyConfirm(request: Request): Promise<Response> {
+    let body: { sentence?: string; rule?: unknown; proposalHash?: string };
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "Request body must be JSON: { sentence, rule, proposalHash }." }, { status: 400 });
+    }
+    if (typeof body.sentence !== "string" || typeof body.proposalHash !== "string" || !body.rule) {
+      return Response.json({ error: "sentence, rule, and proposalHash are all required." }, { status: 400 });
+    }
+
+    const ruleResult = PolicyRuleSchema.safeParse(body.rule);
+    if (!ruleResult.success) {
+      return Response.json({ error: "rule failed schema validation — re-propose rather than hand-editing it." }, { status: 422 });
+    }
+
+    const recomputed = await proposalHash(body.sentence, ruleResult.data);
+    if (recomputed !== body.proposalHash) {
+      return Response.json(
+        { error: "proposalHash does not match the recomputed hash of sentence+rule. The proposal was edited after preview — re-propose it." },
+        { status: 409 },
+      );
+    }
+
+    const existing = this.sql<PolicyRow>`SELECT * FROM policies WHERE proposal_hash = ${recomputed}`[0];
+    if (existing) {
+      return Response.json({ id: existing.id, sentence: existing.sentence, rule: JSON.parse(existing.rule_json), deduped: true });
+    }
+
+    const id = crypto.randomUUID();
+    const createdAt = new Date().toISOString();
+    this.sql`INSERT INTO policies (id, sentence, rule_json, created_at, proposal_hash)
+      VALUES (${id}, ${body.sentence}, ${JSON.stringify(ruleResult.data)}, ${createdAt}, ${recomputed})`;
+
+    const all = this.sql<{ id: string }>`SELECT id FROM policies ORDER BY created_at DESC`;
+    for (const row of all.slice(MAX_RETAINED_POLICIES)) {
+      this.sql`DELETE FROM policies WHERE id = ${row.id}`;
+    }
+
+    return Response.json({ id, sentence: body.sentence, rule: ruleResult.data, deduped: false });
+  }
+
+  private handleListPolicies(): Response {
+    return Response.json({ policies: this.listPolicies() });
+  }
+
+  private handleDeletePolicy(policyId: string): Response {
+    this.sql`DELETE FROM policies WHERE id = ${policyId}`;
+    return Response.json({ deleted: policyId });
   }
 
   override async onRequest(request: Request): Promise<Response> {
@@ -204,6 +366,18 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     if (request.method === "GET" && tail[0] === "reviews") {
       this.syncSummaryState();
       return Response.json(this.state);
+    }
+    if (request.method === "POST" && tail[0] === "policy" && tail[1] === "propose") {
+      return this.handlePolicyPropose(request);
+    }
+    if (request.method === "POST" && tail[0] === "policy" && tail[1] === "confirm") {
+      return this.handlePolicyConfirm(request);
+    }
+    if (request.method === "GET" && tail[0] === "policies") {
+      return this.handleListPolicies();
+    }
+    if (request.method === "DELETE" && tail[0] === "policies" && tail[1]) {
+      return this.handleDeletePolicy(tail[1]);
     }
     return Response.json({ error: "Not found" }, { status: 404 });
   }
