@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+/// <reference types="node" />
 // Local CLI over the deterministic core. Invoke via `npm run cli -- <file>`
 // after `npm install` (this package is not published, so don't advertise
 // `npx blast-radius` — see PLAN.md §4).
