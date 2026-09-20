@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # No lockfile is committed yet (package-lock.json is present but was
+      # generated locally; see docs/decisions.md for the --legacy-peer-deps
+      # dependency note). `npm install` here mirrors the documented local
+      # setup exactly so CI can't silently drift from README instructions.
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests (offline — no network, no credentials)
+        run: npm test
+
+      - name: CLI smoke test against all bundled sample plans
+        run: |
+          npm run cli -- ui/samples/replace-db.json; test $? -eq 1
+          npm run cli -- ui/samples/ordinary-update.json; test $? -eq 0
+          npm run cli -- ui/samples/incomplete-evidence.json; test $? -eq 0
+
+      - name: Production build (no deploy — no credentials in CI)
+        run: npx wrangler deploy --dry-run --outdir dist
