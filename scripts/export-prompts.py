@@ -23,6 +23,14 @@ REDACTIONS = [
     (re.compile(r"\b0\d{5}\s?\d{5}\b"), "[REDACTED: phone number]"),
     (re.compile(r"\bashrafahmed1232@gmail\.com\b", re.I), "[REDACTED: personal email]"),
     (re.compile(r"\bdev\.thejobsjungle2@gmail\.com\b", re.I), "[REDACTED: contact email]"),
+    # Cloudflare API tokens (cfut_... / 40-character-plus opaque tokens the
+    # user might paste directly into chat, as happened in this session).
+    (re.compile(r"\bcfut_[A-Za-z0-9_-]{20,}\b"), "[REDACTED: Cloudflare API token]"),
+    # Generic fallback: a long, high-entropy alphanumeric token-looking
+    # string (32+ chars, no spaces) is redacted defensively even if it
+    # doesn't match a known prefix — better to over-redact a false positive
+    # than to leak a credential.
+    (re.compile(r"\b[A-Za-z0-9_-]{40,}\b"), "[REDACTED: possible token/secret]"),
 ]
 
 

@@ -6,14 +6,26 @@
 
 import type { AnalysisResult } from "../core/types.js";
 
-// Matches things that look like resource addresses: type.name, optionally
-// with an index/key or #deposed suffix, e.g. aws_db_instance.main,
-// module.x.aws_instance.web[0], cloudflare_dns_record.api#deposed:ab12.
-const ADDRESS_PATTERN = /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)*\.[a-zA-Z0-9_\-]+(?:\[[^\]]+\])?(?:#deposed:[a-zA-Z0-9]+)?)\b/g;
+// Matches a full dot-joined identifier chain, each segment optionally
+// bracket-indexed, e.g. aws_db_instance.main, aws_instance.web[0],
+// module.prod.aws_db_instance.main, cloudflare_dns_record.api#deposed:ab12.
+// Greedy: consumes as many ".segment" hops as are contiguously present, so
+// a module-qualified address isn't truncated to its last two segments and
+// an index suffix isn't dropped by \b backtracking on the closing "]"
+// (both were real bugs — confirmed by testing the previous single-hop
+// pattern against exactly these two cases; see git history).
+const ADDRESS_PATTERN =
+  /\b[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]\s]+\])?(?:\.[a-zA-Z_][a-zA-Z0-9_]*(?:\[[^\]\s]+\])?)+(?:#deposed:[a-zA-Z0-9]+)?/g;
 
-// Terraform type/provider name fragments that match the address shape but
-// are not resource addresses on their own (avoid false-positive flags).
-const NON_ADDRESS_PREFIXES = ["var.", "local.", "data.", "module.", "each.", "count.", "path.", "terraform."];
+// Reference-only prefixes that can never be a resource address on their
+// own (var./local./each./count./path./terraform. inputs and locals never
+// appear as a fact's `address`). Deliberately NOT excluding "module." or
+// "data." here: a module-qualified resource address legitimately starts
+// with "module." (e.g. module.prod.aws_db_instance.main), and a data
+// source's address legitimately starts with "data." — both can be real,
+// known addresses, so they're checked against knownAddresses like anything
+// else instead of being blanket-excluded.
+const NON_ADDRESS_PREFIXES = ["var.", "local.", "each.", "count.", "path.", "terraform."];
 
 export interface VerifiedAnswer {
   text: string;

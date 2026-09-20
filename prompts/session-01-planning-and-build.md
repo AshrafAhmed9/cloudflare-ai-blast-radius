@@ -1,6 +1,6 @@
 # Session 1 — Planning and initial build (Claude Code, Opus 5 / Sonnet 5)
 
-8 human prompts extracted from the raw session transcript, in order.
+12 human prompts extracted from the raw session transcript, in order.
 
 ## 1. 2026-09-19T23:38:07.208Z (turn-start)
 
@@ -583,4 +583,60 @@ tell me what is left have you completed the entire submission
 
 ```
 and very simple language explained to me what this project is and why you are confident it's good enough to win
+```
+
+## 9. 2026-09-20T09:11:26.523Z (turn-start)
+
+```
+Tell me what is left.
+```
+
+## 10. 2026-09-20T09:12:09.300Z (turn-start)
+
+```
+hwo do i do 1st one?
+```
+
+## 11. 2026-09-20T09:13:31.381Z (turn-start)
+
+```
+Support
+ Back to view all tokens
+Create Custom Token
+Token name
+Give your API token a descriptive name.
+Permissions
+Select edit or read permissions to apply to your accounts or websites for this token.
+Resources
+Account
+Permissions
+Select
+
+Select...
+
+Add more
+Account Resources
+Select accounts to include or exclude.
+Include
+All accounts
+
+Add more
+Client IP Address Filtering
+Select IP addresses or ranges of IP addresses to filter. This filter limits the client IP addresses that can use the API token with Cloudflare. By default, this token will apply to all addresses.
+Operator
+Value
+Select IP addresses or ranges of IP addresses to filter. This filter limits the client IP addresses that can use the API token with Cloudflare. By default, this token will apply to all addresses.
+Select
+
+e.g. 192.168.1.88
+
+Add more
+TTL
+Define how long this token will stay active.
+```
+
+## 12. 2026-09-20T09:15:19.288Z (turn-start)
+
+```
+[REDACTED: Cloudflare API token]
 ```

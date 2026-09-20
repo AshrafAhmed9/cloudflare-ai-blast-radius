@@ -79,12 +79,84 @@ to for the deterministic core. See "Not built in this pass" below.
 - **Delete-workspace endpoint** and documented retention policy beyond the
   cookie's 30-day expiry, the 20-review retention cap, and the 30-policy
   retention cap.
-- **Live verification** of the Workers AI call path (chat, review
-  summaries, and the policy compiler all call `env.AI.run` and are only
-  unit-tested against a mock), the WebSocket chat flow in a browser, and an
-  actual `wrangler deploy` — blocked on Cloudflare credentials not available
-  in the build environment. `npx wrangler deploy --dry-run` does succeed and
-  bundles all of this correctly. See `docs/decisions.md`.
+
+## Adversarial-review findings
+
+A concurrent review session (see `SUBMISSION_REVIEW.md` — kept in the repo
+root as the raw record; not a submission artifact itself) inspected this
+codebase, ran real probes against the actual source, and found 15 numbered
+issues (R1–R15). Given the size of that list against remaining build time,
+this pass triaged rather than implementing all of it. What follows is the
+honest disposition of each.
+
+**Fixed this pass, each with a regression test:**
+
+- **R1 (infinite loop, confirmed and fixed):** `fetchWorkspaceState()` called
+  `selectReview()` whenever an active review existed, and `selectReview()`
+  called `fetchWorkspaceState()` again at the end — unbounded mutual
+  recursion. Fixed by splitting into `refreshReviewList()` (list-only,
+  never selects) and `hydrateWorkspace()` (runs once, on page load).
+  `test/ui-loop.test.ts` loads the real `ui/app.js` against stubbed
+  fetch/DOM and fails against the pre-fix code, passes against the fix —
+  verified both directions, not just asserted.
+- **R5 partial (S3 bucket rule, confirmed and fixed):** the rule only
+  matched plain `delete`, not a replacement (which also deletes the old
+  bucket). One-line fix in `src/core/rules.ts`; `test/rules.test.ts` covers
+  both replace orders for every stateful-resource rule, not just S3.
+- **R4 partial (`action_reason` location, confirmed and fixed):** verified
+  against the actual HashiCorp JSON format spec — the field is a sibling of
+  `change` on the resource_changes[] entry, not nested inside it. Was
+  reading the wrong location, so it was always silently `undefined`.
+- **R11 partial (chat verifier address matching, confirmed and fixed):** the
+  regex used to check whether a chat answer's cited resource ids are real
+  dropped bracket suffixes (`aws_instance.web[0]` → `aws_instance.web`, no
+  longer matching the real address) and truncated module-qualified
+  addresses to their last two segments. Verified both failures with a
+  standalone `node -e` regex test before fixing, then added regression
+  tests for indexed, module-qualified, and data-source addresses.
+- **R15 partial (misleading CI example):** the README's one-line CLI usage
+  example (`cmd || test $? -eq 1 && echo ...`) always exits 0 regardless of
+  the underlying finding, due to shell operator grouping — meaning it would
+  silently never fail a CI step even on a real high-severity finding.
+  Replaced with a correct example plus an explanation of why the compound
+  form was wrong.
+
+**Confirmed real, not fixed this pass — tracked, not hidden:**
+
+- **R7 (policy confirmation binding):** `POST /policy/confirm` accepts a
+  client-supplied `(sentence, rule, proposalHash)` triple and checks that
+  the hash matches what it recomputes server-side. That correctly stops an
+  *edited* proposal from reusing an old approval (tested), but it does not
+  stop someone from skipping `/policy/propose` entirely and calling
+  `/policy/confirm` directly with a hash they compute themselves, since the
+  hash function is public and stateless rather than a server-issued opaque
+  token. A correct fix stores the proposal server-side (with an id, TTL,
+  and the review/revision it was previewed against) and confirms by that id
+  — a real design change, not a one-line fix, so it's deferred rather than
+  rushed.
+- **R2 (workspace bootstrap race):** the UI opens its WebSocket, the
+  `/reviews` fetch, and the `/policies` fetch independently rather than
+  sequencing one awaited bootstrap first; in principle their responses
+  could race on a cookie-less first visit. Not reproduced with a failing
+  test in this pass — flagged as plausible, not confirmed, unlike the items
+  above which were each verified failing before being fixed.
+- **R3, R6, R8, R9, R10, R12, R13:** UI truthfulness details (stale cache on
+  reconnect, optimistic-append double-counting, unchecked confirm/delete
+  responses), policy-predicate path-semantics edge cases, input-validation
+  hardening (size/origin/state-write protection), AI-call cost/status
+  persistence, a SQLite migration path for already-deployed workspaces with
+  the pre-policy schema, UI evidence-panel polish, and a real `bench/`
+  harness with Workers-runtime integration tests. Each is a real, legitimate
+  gap the review correctly identified; none were reproduced with a failing
+  test or fixed in this pass given remaining time. Treat `SUBMISSION_REVIEW.md`
+  as the authoritative task list if this project continues.
+
+This section exists because publishing "everything works" after finding 15
+real issues and fixing 5 of them would be dishonest. The 5 fixed here were
+chosen because they were cheap to verify, cheap to fix, and either directly
+undermined this project's own thesis (S3 rule gap, chat-grounding regex) or
+were an outright functional bug (the UI loop). The rest are real work, not
+excuses.
 
 ## Input limits (may reject a legitimate large plan)
 

@@ -149,24 +149,39 @@ function appendChatBubble(message) {
   el.chatLog.scrollTop = el.chatLog.scrollHeight;
 }
 
-async function fetchWorkspaceState() {
+// R1 fix (adversarial review): fetchWorkspaceState() used to call
+// selectReview() when there was an active review, and selectReview() called
+// fetchWorkspaceState() again at the end — an unbounded mutual-recursion
+// loop that never settled once any review existed. Fixed by separating
+// "refresh the list" (never selects) from "select a review" (never
+// re-fetches the whole workspace, only refreshes the list rendering after).
+// selectionToken guards against a slow, stale selectReview() call
+// overwriting a newer one if the user clicks two reviews in quick succession.
+
+let selectionToken = 0;
+
+async function refreshReviewList() {
   const res = await fetch(`${AGENT_HTTP_BASE}/reviews`);
-  if (!res.ok) return;
+  if (!res.ok) return null;
   const state = await res.json();
   renderReviewList(state.reviews);
-  if (state.activeReviewId) selectReview(state.activeReviewId);
+  return state;
 }
 
 async function selectReview(reviewId) {
+  const token = ++selectionToken;
   activeReviewId = reviewId;
   let cache = reviewCache.get(reviewId);
   if (!cache) {
     const res = await fetch(`${AGENT_HTTP_BASE}/review/${encodeURIComponent(reviewId)}`);
+    if (token !== selectionToken) return; // a newer selection started while this fetch was in flight
     if (!res.ok) return;
     const data = await res.json();
     cache = { result: data.result, messages: data.messages ?? [], policyFindings: data.policyFindings ?? [] };
     reviewCache.set(reviewId, cache);
   }
+  if (token !== selectionToken) return; // still guard the cached-hit path for consistency
+
   activeResult = cache.result;
   renderReport(activeResult, cache.policyFindings);
   el.chatLog.innerHTML = "";
@@ -176,7 +191,13 @@ async function selectReview(reviewId) {
   el.chatInput.disabled = false;
   el.chatSend.disabled = false;
   if (ws && wsReady) ws.send(JSON.stringify({ type: "set_active", reviewId }));
-  await fetchWorkspaceState().catch(() => {});
+  await refreshReviewList().catch(() => {}); // updates list highlighting only — never re-selects
+}
+
+/** Call once, on initial page load only. */
+async function hydrateWorkspace() {
+  const state = await refreshReviewList().catch(() => null);
+  if (state?.activeReviewId) await selectReview(state.activeReviewId);
 }
 
 async function submitPlan(planText, label) {
@@ -310,6 +331,6 @@ el.chatForm.addEventListener("submit", (e) => {
 });
 
 connectWebSocket();
-fetchWorkspaceState().catch(() => {
+hydrateWorkspace().catch(() => {
   el.status.textContent = "no reviews yet";
 });

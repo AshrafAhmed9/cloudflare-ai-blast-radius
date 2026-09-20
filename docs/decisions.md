@@ -117,21 +117,47 @@ features. Routed around by adding both packages as direct dependencies here
 forking `agents`. Worth reporting upstream; not done as part of this
 submission.
 
-## Why `wrangler dev` and deploy were not verified against the live Workers AI service
+## Deployed and verified live — and what that caught
 
 Workers AI has no local emulation — every `env.AI.run()` call proxies to the
 real Cloudflare API, which requires an authenticated `wrangler` session or a
-`CLOUDFLARE_API_TOKEN`. Neither was available in the environment this was
-built in (`wrangler whoami` reports not logged in, no token set). Everything
-that doesn't require the AI binding was verified directly: the deterministic
-core, the CLI (run against all three real sample plans with correct output and
-exit codes), and all 33 offline unit tests pass under Node 22 (the minimum
-`wrangler` 4.135 requires — this machine's default Node was 20.20.2, switched
-via `nvm install 22`).
+`CLOUDFLARE_API_TOKEN`. Neither was available for most of this build; Ashraf
+created a scoped API token (`Workers Scripts:Edit`, `Workers AI:Edit`,
+`Account Settings:Read`) partway through, which unblocked the rest. The
+token was only ever held in a shell environment variable for this session —
+never written to a repo file (`.dev.vars` doesn't exist in this repo; check
+for yourself).
 
-What was **not** independently verified before this commit: a live Workers AI
-response (the model call path is unit-tested against a mock, not the real
-API), the WebSocket chat flow end-to-end in a browser, and an actual
-`wrangler deploy`. These need one of: `wrangler login` run interactively, or a
-`CLOUDFLARE_API_TOKEN` in the environment. This is stated plainly rather than
-claimed as done — see the README's "Verified vs. not yet verified" section.
+`wrangler deploy` succeeded on the first attempt (Node 22 required — this
+machine defaults to 20.20.2, switched via `nvm install 22`). Deployed URL:
+`https://cf-ai-blast-radius.ashrafahmed1232.workers.dev`.
+
+**Live verification immediately found two real bugs mocked tests couldn't
+catch**, both fixed and redeployed before submission:
+
+1. **The `agents` package packaging issue** (covered above) — caught by
+   `wrangler dev` failing to bundle, before any AI call was even involved.
+
+2. **Workers AI pre-parses JSON completions.** When a model's output is
+   valid JSON, `env.AI.run()`'s response comes back with `raw.response` as
+   an **already-parsed object**, not the JSON string the documented example
+   implies. `src/policies/compile.ts`'s extraction only handled the string
+   case, so every live policy-compile request silently got an empty string
+   and failed after two retries — mocked tests all passed because the mock
+   correctly returned a string, matching the documented shape, not the real
+   one. Found via `wrangler tail` against the live deployment, fixed by
+   handling both shapes explicitly in `callModel`, and covered by a new
+   test (`test/policy-compile.test.ts`, "accepts a pre-parsed object
+   response") using the exact shape observed live. This is exactly the kind
+   of gap a dry-run build or a mocked test cannot surface — only calling the
+   real API did.
+
+After both fixes, the full lifecycle was verified against the live app, not
+just re-deployed and assumed working: a real plan submitted → correct
+deterministic findings → a live Llama 3.3 summary appended a few seconds
+later, correctly citing the resource id and forcing attribute; a live
+WebSocket chat question → grounded, correct, cited the right evidence path;
+a policy proposed and confirmed live → a review submitted *after* showed the
+policy finding, a review submitted *before* did not — confirming the
+snapshot-not-live-recompute design holds against the real infrastructure,
+not just mocked tests.

@@ -26,9 +26,14 @@ const ChangeSchema = z.object({
   before_sensitive: z.unknown().optional(),
   after_sensitive: z.unknown().optional(),
   replace_paths: z.array(z.array(z.union([z.string(), z.number()]))).optional(),
-  action_reason: z.string().optional(),
 });
 
+// `action_reason` is a sibling of `change` on the resource_changes[] entry
+// itself, NOT nested inside `change` — confirmed against the HashiCorp JSON
+// format spec after an earlier version of this parser read it from the
+// wrong location (`rc.change.action_reason` instead of `rc.action_reason`),
+// which meant it was always undefined even when Terraform actually provided
+// it. Found via adversarial review; see docs/decisions.md.
 const ResourceChangeSchema = z.object({
   address: z.string(),
   module_address: z.string().optional(),
@@ -37,6 +42,7 @@ const ResourceChangeSchema = z.object({
   name: z.string(),
   provider_name: z.string(),
   deposed: z.string().optional(),
+  action_reason: z.string().optional(),
   change: ChangeSchema,
 });
 
@@ -46,6 +52,14 @@ const PlanSchema = z.object({
   resource_changes: z.array(ResourceChangeSchema).optional(),
   configuration: z.unknown().optional(),
   prior_state: z.unknown().optional(),
+  // Top-level status flags a real plan document carries. Not fully acted on
+  // yet (see docs/limitations.md for what's still missing: distinguishing
+  // an errored/incomplete plan or a bare state document from an ordinary
+  // zero-change plan) — but an `errored: true` plan now at least produces a
+  // visible warning instead of being silently treated as "0 changes, fine".
+  errored: z.boolean().optional(),
+  complete: z.boolean().optional(),
+  applyable: z.boolean().optional(),
 });
 
 export class PlanParseError extends Error {
@@ -152,6 +166,12 @@ export function parsePlan(raw: unknown): ParsedPlan {
   const warnings: string[] = [];
   const facts: ResourceChangeFact[] = [];
 
+  if (plan.errored === true) {
+    warnings.push(
+      "Terraform reported this plan run as errored (top-level `errored: true`). Results below may be incomplete — this is not a clean, fully-evaluated plan.",
+    );
+  }
+
   for (const rc of plan.resource_changes ?? []) {
     const { planned, tf } = classifyActions(rc.change.actions);
     if (planned === "unsupported") {
@@ -174,7 +194,7 @@ export function parsePlan(raw: unknown): ParsedPlan {
     );
 
     const isReplacement = planned === "replace-delete-first" || planned === "replace-create-first";
-    const replacementCauseAvailable = isReplacement && (replacePaths.length > 0 || !!rc.change.action_reason);
+    const replacementCauseAvailable = isReplacement && (replacePaths.length > 0 || !!rc.action_reason);
 
     const id = rc.deposed ? `${rc.address}#deposed:${rc.deposed}` : rc.address;
 
@@ -189,7 +209,7 @@ export function parsePlan(raw: unknown): ParsedPlan {
       plannedAction: planned,
       replacePaths,
       replacementCauseAvailable,
-      actionReason: rc.change.action_reason,
+      actionReason: rc.action_reason,
       unknownPaths,
       sensitivePaths,
       deposed: rc.deposed,

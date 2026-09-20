@@ -124,6 +124,36 @@ describe("parsePlan", () => {
     expect(plan.facts[0]!.unknownPaths).toEqual(["id"]);
   });
 
+  it("reads action_reason from its correct location (sibling of `change`, not nested inside it)", () => {
+    // Regression: an earlier version read `rc.change.action_reason`, which
+    // per the HashiCorp JSON format spec is the wrong location — the field
+    // is a sibling of `change` on the resource_changes[] entry itself. That
+    // bug meant a real action_reason was always silently dropped.
+    const plan = parsePlan(
+      basePlan({
+        resource_changes: [
+          {
+            address: "null_resource.tainted",
+            mode: "managed",
+            type: "null_resource",
+            name: "tainted",
+            provider_name: "registry.terraform.io/hashicorp/null",
+            action_reason: "replace_because_tainted",
+            change: { actions: ["delete", "create"], before: {}, after: {} },
+          },
+        ],
+      }),
+    );
+    const fact = plan.facts[0]!;
+    expect(fact.actionReason).toBe("replace_because_tainted");
+    expect(fact.replacementCauseAvailable).toBe(true);
+  });
+
+  it("warns when the plan document reports errored: true, instead of silently treating it as a clean zero-change plan", () => {
+    const plan = parsePlan(basePlan({ errored: true }));
+    expect(plan.warnings.some((w) => w.includes("errored"))).toBe(true);
+  });
+
   it("distinguishes deposed instances by id", () => {
     const plan = parsePlan(
       basePlan({

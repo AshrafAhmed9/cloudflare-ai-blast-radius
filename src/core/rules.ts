@@ -50,10 +50,14 @@ export const RULE_PACK: Rule[] = [
   {
     id: "aws-s3-bucket-delete",
     resourceType: "aws_s3_bucket",
-    appliesTo: ["delete"],
+    // A replacement (e.g. changing `bucket` or `bucket_prefix`) deletes the
+    // old bucket exactly as a plain delete does — this rule originally only
+    // covered ["delete"], silently missing that case. Confirmed via a live
+    // adversarial review of this repo and fixed here; see docs/decisions.md.
+    appliesTo: REPLACE_OR_DELETE,
     severity: "high",
     message:
-      "Terraform plans to delete this S3 bucket. Bucket contents are not restorable through Terraform; confirm the bucket is empty or a lifecycle/replication policy covers it.",
+      "Terraform plans to delete or replace this S3 bucket. Bucket contents are not restorable through Terraform; confirm the bucket is empty or a lifecycle/replication policy covers it.",
     source: {
       provider: "hashicorp/aws",
       providerVersionTested: "5.94.0",

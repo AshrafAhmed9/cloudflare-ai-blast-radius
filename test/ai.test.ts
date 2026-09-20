@@ -51,6 +51,61 @@ describe("verifyChatAnswer", () => {
     const verified = verifyChatAnswer("This depends on var.region and local.tags.", result);
     expect(verified.citedUnknownIds).toEqual([]);
   });
+
+  it("recognizes an indexed address (bracket suffix) as known — regression: the bracket was previously dropped by the matcher", () => {
+    const result = analyzePlan({
+      format_version: "1.2",
+      resource_changes: [
+        {
+          address: "aws_instance.web[0]",
+          mode: "managed",
+          type: "aws_instance",
+          name: "web",
+          provider_name: "registry.terraform.io/hashicorp/aws",
+          change: { actions: ["create"], before: null, after: {} },
+        },
+      ],
+    });
+    const verified = verifyChatAnswer("aws_instance.web[0] is being created.", result);
+    expect(verified.citedUnknownIds).toEqual([]);
+  });
+
+  it("recognizes a module-qualified address as known — regression: it was previously truncated to its last two segments", () => {
+    const result = analyzePlan({
+      format_version: "1.2",
+      resource_changes: [
+        {
+          address: "module.prod.aws_db_instance.main",
+          module_address: "module.prod",
+          mode: "managed",
+          type: "aws_db_instance",
+          name: "main",
+          provider_name: "registry.terraform.io/hashicorp/aws",
+          change: { actions: ["delete", "create"], before: {}, after: {}, replace_paths: [["engine"]] },
+        },
+      ],
+    });
+    const verified = verifyChatAnswer("module.prod.aws_db_instance.main is being replaced.", result);
+    expect(verified.citedUnknownIds).toEqual([]);
+  });
+
+  it("recognizes a data-source address as known — regression: 'data.' was previously always excluded even when real", () => {
+    const result = analyzePlan({
+      format_version: "1.2",
+      resource_changes: [
+        {
+          address: "data.aws_ami.example",
+          mode: "data",
+          type: "aws_ami",
+          name: "example",
+          provider_name: "registry.terraform.io/hashicorp/aws",
+          change: { actions: ["read"], before: null, after: {} },
+        },
+      ],
+    });
+    const verified = verifyChatAnswer("data.aws_ami.example will be read.", result);
+    expect(verified.citedUnknownIds).toEqual([]);
+  });
 });
 
 describe("askAboutReview", () => {

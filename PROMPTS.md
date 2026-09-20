@@ -28,12 +28,27 @@ scripts/export-prompts.py <transcript.jsonl> <output.md> <title>`.
 ## Redaction
 
 The initial prompt is the full pasted job posting and application form,
-which contained Ashraf's personal phone number and two email addresses. Both
-are redacted with an explicit `[REDACTED: <label>]` marker by regex in the
-exporter — see `REDACTIONS` in `scripts/export-prompts.py`. Nothing else in
-this transcript matched a secret/token pattern on inspection; that was
-checked manually, not exhaustively, so treat this as "checked," not
-"guaranteed clean."
+which contained Ashraf's personal phone number and two email addresses.
+Partway through the session, Ashraf also pasted a live Cloudflare API token
+directly into chat so this work could deploy and verify against the real
+API. All of these are redacted with an explicit `[REDACTED: <label>]` marker
+by regex in the exporter — see `REDACTIONS` in `scripts/export-prompts.py`.
+
+The token redaction was **not caught on the first export** — an earlier
+version of the exporter only redacted phone/email patterns, and the token
+appeared in plaintext in a draft of `prompts/session-01-planning-and-build.md`
+that was about to be committed. It was caught before any `git add`/`commit`
+(verified via `git status` and a repo-wide grep for the token string — see
+git history if this repo's history is ever inspected for the fix commit),
+the exporter was given a token-pattern rule plus a generic long-opaque-string
+fallback, and re-run. Nothing else in this transcript matched a secret/token
+pattern on inspection beyond what the exporter now redacts automatically;
+that was checked manually, not exhaustively, so treat this as "checked," not
+"guaranteed clean." **The token itself should be rotated/revoked** once this
+project is done being iterated on, since it was pasted into a chat session
+whose local transcript (outside this repo, on Ashraf's machine) retains it
+in plaintext — that's normal for how Claude Code stores history, but it's a
+reason to rotate the credential, not a reason to worry about this repo.
 
 ## What the model got wrong, and the correction
 
@@ -57,11 +72,19 @@ checked manually, not exhaustively, so treat this as "checked," not
   This was a real build failure, not a prompting issue — caught by actually
   running `wrangler dev`, not assumed away. Fixed by adding those packages
   directly; documented in `docs/decisions.md`.
-- **No Cloudflare credentials were available** in the build environment to
-  verify a live Workers AI call or run `wrangler deploy`. Rather than
-  claiming this was done, `docs/decisions.md` and the README state plainly
-  what was and wasn't verified, and what's needed (`wrangler login` or a
-  `CLOUDFLARE_API_TOKEN`) to complete verification.
+- **No Cloudflare credentials were available** for most of the build.
+  Rather than claiming live verification was done, `docs/decisions.md` and
+  the README stated plainly what wasn't verified and what was needed. Ashraf
+  then supplied a scoped API token, which unblocked deployment — see below.
+- **Live deployment immediately found two real bugs no mocked test could
+  catch**: a packaging issue in the `agents` dependency, and — more
+  interesting — Workers AI pre-parsing JSON model output into an object
+  rather than returning it as a string, which silently broke every live
+  policy-compile call until `wrangler tail` surfaced the actual payload
+  shape and the code was fixed to handle both. Both are documented in full
+  in `docs/decisions.md`, including the exact bug and the fix, because this
+  is the most concrete evidence in the whole submission that "verified" here
+  means actually run, not assumed.
 
 If a later session continues this work, re-run the exporter and append a new
 `prompts/session-NN-*.md` rather than editing this history.

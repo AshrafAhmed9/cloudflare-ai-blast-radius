@@ -4,9 +4,10 @@ Reads `terraform show -json` output and reports what each planned change
 actually does, with the exact evidence for each claim — not a guess, and
 never "safe to apply."
 
-**Deployed URL:** not yet deployed — see [Status](#status) below; this needs
-Cloudflare credentials this environment didn't have. Everything else in this
-README was run and verified directly (commands and output included).
+**Deployed URL:** https://cf-ai-blast-radius.ashrafahmed1232.workers.dev —
+live, verified end-to-end (deterministic analysis, live Workers AI chat, and
+the policy compiler all tested against the real running app — see
+[Status](#status)).
 
 ```
 $ npm run cli -- ui/samples/replace-db.json
@@ -72,7 +73,7 @@ why D1 wasn't added — both are real tradeoffs, not omissions.
 nvm install 22 && nvm use 22   # wrangler 4.x requires Node >= 22
 npm install --legacy-peer-deps # see docs/decisions.md for the one dependency conflict this bypasses
 npm run typecheck
-npm test                       # 33 tests, all offline, no network
+npm test                       # 75 tests, all offline, no network
 npm run cli -- ui/samples/replace-db.json
 npm run cli -- ui/samples/ordinary-update.json
 npm run cli -- ui/samples/incomplete-evidence.json
@@ -82,9 +83,27 @@ CLI exit codes: `0` = no high-severity finding under supported checks, `1` =
 at least one high-severity finding, `2` = invalid/unsupported input. Exit `0`
 is not a safety guarantee — it means the checks this tool runs found nothing.
 
-Example CI usage: `npm run cli -- plan.json || test $? -eq 1 && echo "review required"`.
+Example CI usage — the exit code alone is the gate; most CI systems fail the
+step automatically on a non-zero exit, so no extra shell logic is needed:
 
-## Running the full app (needs Cloudflare credentials)
+```bash
+npm run cli -- plan.json
+```
+
+If you want a custom message on top of that (rather than just failing the
+step), capture and re-propagate the exit code explicitly — do **not** chain
+it with `||`/`&&` on one line, which silently swallows the real exit code
+(a mistake an earlier draft of this README made — the compound line reported
+success even when a high-severity finding was present):
+
+```bash
+npm run cli -- plan.json
+code=$?
+if [ "$code" -eq 1 ]; then echo "review required"; fi
+exit "$code"
+```
+
+## Running the full app locally (needs Cloudflare credentials)
 
 ```bash
 wrangler login          # or: export CLOUDFLARE_API_TOKEN=...
@@ -93,8 +112,8 @@ npm run deploy
 ```
 
 Workers AI has no local emulation; every `env.AI.run()` call in `npm run dev`
-hits the real API. This wasn't run in the build environment — see
-[Status](#status).
+hits the real API. The deployed app above is already live and doesn't
+require this — this is only for local development.
 
 ## Architecture
 
@@ -123,48 +142,86 @@ first) and can never change a finding — see `docs/decisions.md`.
 
 Offline, deterministic, reproduced by `npm test`:
 
-- **55 unit tests, 0 failures** — parser (8), analyze orchestrator (7),
-  reference graph (6), sanitize/redaction (6), AI context/verify (6), policy
-  interpreter's three-valued logic (11), policy compiler including a real
-  bug it caught (7), proposal-hash binding (4).
+- **75 unit tests, 0 failures** — parser (10), analyze orchestrator (7),
+  reference graph (6), rule pack (12), sanitize/redaction (6), AI
+  context/verify (9), policy interpreter's three-valued logic (11), policy
+  compiler including two real bugs it caught (9), proposal-hash binding (4),
+  and a browser-client regression test that loads the actual `ui/app.js`
+  against stubbed fetch/DOM to prove a real infinite-request-loop bug (found
+  by adversarial review) stays fixed (1).
 - All three sample plans (`ui/samples/*.json`) produce the exact output shown
   at the top of this README and in [`docs/limitations.md`](docs/limitations.md).
 
-**Not yet measured**, because they require live Workers AI access this build
-environment didn't have: live chat response quality, live latency/token
-usage, and a held-out accuracy benchmark against a larger real-plan corpus.
-`bench/` is not yet built — see [Status](#status). Publishing a fabricated
+Live, verified against the deployed app (not mocked):
+
+- Submitted a real plan → correct deterministic findings, then a live Llama
+  3.3 summary appended a few seconds later, correctly citing the resource id
+  and the exact attribute that forced the replacement.
+- Asked the live chat "why is this being replaced?" over a real WebSocket
+  connection → grounded, correct answer citing `replace_paths: instance_class`.
+- Proposed a live policy ("Flag deletion or replacement of database
+  instances") → compiled, dry-run showed the correct match, confirmed, then
+  a **new** review submitted afterward showed the policy finding citing the
+  sentence, while the **original** review (submitted before the policy
+  existed) stayed unchanged at zero policy findings — the snapshot guarantee
+  from `docs/decisions.md` holds against the real infrastructure, not just
+  in mocked tests.
+- This surfaced and fixed a real bug: Workers AI returns `raw.response`
+  **pre-parsed as an object**, not a JSON string, when the completion is
+  valid JSON — undocumented behavior found via `wrangler tail`, not in the
+  docs. The policy compiler was silently getting an empty string and failing
+  every live request until this was fixed. See `docs/decisions.md`.
+
+**Not yet measured:** a held-out accuracy benchmark against a larger
+real-plan corpus (`bench/` — see [Status](#status)); publishing a fabricated
 number here would be worse than publishing none.
 
 ## Limitations
 
-See [`docs/limitations.md`](docs/limitations.md) for the full list. In short:
-the reference graph only resolves single-instance, root-module resources
-(count/for_each and nested modules are reported as unresolved, not guessed);
-the rule pack covers 6 resource types; replacement causes are only shown when
-Terraform's plan JSON itself provides them; the policy compiler described in
-early planning (teach it a rule in English) was not built in this pass — see
-`docs/decisions.md` for why, and what it would take.
+See [`docs/limitations.md`](docs/limitations.md) for the full list, including
+an itemized adversarial-review backlog (`docs/limitations.md#adversarial-review-findings`)
+covering what was fixed versus deliberately deferred. In short: the reference
+graph only resolves single-instance, root-module resources (count/for_each
+and nested modules are reported as unresolved, not guessed); the rule pack
+covers 6 resource types; replacement causes are only shown when Terraform's
+plan JSON itself provides them; the policy-confirm step trusts a
+client-recomputable hash rather than a server-issued opaque proposal token,
+so it binds an *edited* proposal to its preview but doesn't stop someone from
+skipping the preview step entirely (see R7 in the linked backlog).
 
 ## Status
 
 Honest, as of this commit:
 
-- **Built and verified:** deterministic core, rule pack, reference graph,
-  CLI (run against all three sample plans with correct output shown above),
-  33 passing offline tests, clean typecheck, chat/agent code (unit-tested
-  against a mocked AI binding, not yet a live one).
-- **Built, not yet live-verified:** `npx wrangler deploy --dry-run` succeeds
-  — the Worker bundles cleanly, all bindings (Durable Object, AI, Assets)
-  resolve, 6 static files are read (this requires no credentials, and caught
-  a real packaging bug in the `agents@0.24.0` dependency, fixed — see
-  `docs/decisions.md`). What that dry run does *not* verify: an actual live
-  Workers AI response, the WebSocket chat flow in a browser, or an actual
-  `wrangler deploy` — those need Cloudflare credentials not available in
-  this build environment.
-- **Not built:** `bench/` accuracy measurement against a larger real-plan
-  corpus, a delete-workspace endpoint. See `docs/decisions.md` and
-  `docs/limitations.md` for the reasoning behind each cut.
+- **Built, deployed, and verified live:** deterministic core, rule pack,
+  reference graph, policy compiler, chat — all confirmed against the real
+  running app at the URL above, not just mocked tests. 75 passing offline
+  tests, clean typecheck, CI green. `wrangler deploy` succeeded; a real
+  packaging bug in the `agents@0.24.0` dependency and a real Workers AI
+  response-shape bug in the policy compiler were both found and fixed by
+  actually running this live, not assumed away — see `docs/decisions.md`
+  and the Results section above.
+- **Adversarial review found and this pass fixed 5 real bugs**, each with a
+  regression test proving it: a genuine infinite-request loop in the browser
+  client that never settled once any review existed (caught with a test
+  that loads the real `ui/app.js` and fails against the old code, passes
+  against the fix); an S3 bucket rule that only matched plain deletion, not
+  replacement, silently missing the exact "silent failure" shape this
+  project is built to catch; `action_reason` read from the wrong location
+  in Terraform's JSON schema (always silently `undefined`); and two
+  resource-address-matching bugs in the chat grounding verifier (indexed
+  addresses like `aws_instance.web[0]` losing their bracket, module-qualified
+  addresses like `module.prod.aws_db_instance.main` truncated to their last
+  two segments) — both confirmed with `node -e` against the live regex
+  before fixing.
+- **Not fixed, deliberately deferred, tracked honestly:** a real design gap
+  where policy confirmation trusts a client-recomputable hash rather than a
+  server-issued proposal token; several input-validation and
+  observability hardening items; a SQLite schema-migration path for
+  existing deployed workspaces; `bench/` accuracy measurement against a
+  larger real-plan corpus; a held-out policy-compiler evaluation set; a
+  delete-workspace endpoint. Full itemized list with severity and reasoning
+  in `docs/limitations.md`.
 
 ## Repository layout
 

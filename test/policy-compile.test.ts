@@ -14,6 +14,24 @@ function mockAi(responses: string[]): WorkersAIBinding {
 }
 
 describe("compilePolicy", () => {
+  it("accepts a pre-parsed object response — observed live: Workers AI returns raw.response as an OBJECT, not a JSON string, when the completion is valid JSON", async () => {
+    const ai: WorkersAIBinding = {
+      run: async () => ({
+        response: {
+          resourceTypes: ["aws_db_instance"],
+          actions: ["delete"],
+          attributePredicate: null,
+          severity: "high",
+          summary: "Flag database deletions",
+        },
+      }),
+    };
+    const result = await compilePolicy(ai, "Flag database deletions");
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.rule.resourceTypes).toEqual(["aws_db_instance"]);
+  });
+
+
   it("compiles a well-formed model response into a validated rule", async () => {
     const ai = mockAi([
       JSON.stringify({
@@ -84,6 +102,24 @@ describe("compilePolicy", () => {
     const result = await compilePolicy(ai, "   ");
     expect(result.ok).toBe(false);
     expect(called).toBe(false);
+  });
+
+  it("repairs a JS-object-literal response (unquoted keys, single-quoted strings) — observed live from @cf/meta/llama-3.3-70b-instruct-fp8-fast despite the strict-JSON instruction", async () => {
+    const ai = mockAi([
+      `{
+  actions: [ 'delete', 'replace-delete-first', 'replace-create-first' ],
+  attributePredicate: null,
+  resourceTypes: [ 'aws_db_instance', 'aws_rds_cluster', 'cloudflare_d1_database' ],
+  severity: 'high',
+  summary: 'Flag deletion or replacement of database instances'
+}`,
+    ]);
+    const result = await compilePolicy(ai, "Flag deletion or replacement of database instances");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.rule.resourceTypes).toEqual(["aws_db_instance", "aws_rds_cluster", "cloudflare_d1_database"]);
+      expect(result.rule.severity).toBe("high");
+    }
   });
 
   it("strips markdown code fences from the model response", async () => {
