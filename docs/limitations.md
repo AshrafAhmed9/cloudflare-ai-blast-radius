@@ -135,27 +135,40 @@ honest disposition of each.
   Replaced with a correct example plus an explanation of why the compound
   form was wrong.
 
+- **R7 (policy confirmation binding, confirmed and fixed):** `POST
+  /policy/confirm` used to accept a client-supplied `(sentence, rule,
+  proposalHash)` triple, checking only that the hash matched what it
+  recomputed server-side. That stopped an *edited* proposal from reusing an
+  old approval, but nothing stopped someone from skipping `/policy/propose`
+  entirely and calling `/policy/confirm` directly with a hash they computed
+  themselves — the hash function is public and stateless, not a
+  server-issued secret. Fixed by adding a `policy_proposals` SQLite table:
+  `/policy/propose` now stores the compiled (sentence, rule) server-side
+  under an opaque UUID with a 10-minute TTL, and `/policy/confirm` takes
+  only that id — the sentence and rule it persists are read from the stored
+  row, never from the client's request body, and the row is deleted on use
+  so it can't be confirmed twice. `ui/app.js` updated to send `proposalId`
+  instead of the old triple, and to check the confirm response's HTTP
+  status before showing "Saved" (previously ignored). **Not yet covered by
+  an automated test** — exercising this needs the real Durable Object
+  request lifecycle (`this.sql`, TTL expiry), which the current test suite
+  doesn't reach; see R13 below for the missing Workers-runtime integration
+  test harness this and other agent.ts logic needs.
+- **R2 (workspace bootstrap race, confirmed and fixed):** the UI used to
+  open its WebSocket, the `/reviews` fetch, and the `/policies` fetch
+  independently rather than sequencing one awaited bootstrap first, so
+  their responses could race on a cookie-less first visit and split one
+  browser session across two Durable Object instances. Fixed with a single
+  `/api/bootstrap` endpoint in `worker.ts` that the client awaits before
+  anything else connects (`ui/app.js`'s `bootstrapAndStart()`).
+  `test/worker-bootstrap.test.ts` exercises the real exported `fetch`
+  handler directly: exact cookie-name parsing (a cookie merely ending in
+  `br_workspace` must not be adopted) and idempotent Set-Cookie behavior.
+
 **Confirmed real, not fixed this pass — tracked, not hidden:**
 
-- **R7 (policy confirmation binding):** `POST /policy/confirm` accepts a
-  client-supplied `(sentence, rule, proposalHash)` triple and checks that
-  the hash matches what it recomputes server-side. That correctly stops an
-  *edited* proposal from reusing an old approval (tested), but it does not
-  stop someone from skipping `/policy/propose` entirely and calling
-  `/policy/confirm` directly with a hash they compute themselves, since the
-  hash function is public and stateless rather than a server-issued opaque
-  token. A correct fix stores the proposal server-side (with an id, TTL,
-  and the review/revision it was previewed against) and confirms by that id
-  — a real design change, not a one-line fix, so it's deferred rather than
-  rushed.
-- **R2 (workspace bootstrap race):** the UI opens its WebSocket, the
-  `/reviews` fetch, and the `/policies` fetch independently rather than
-  sequencing one awaited bootstrap first; in principle their responses
-  could race on a cookie-less first visit. Not reproduced with a failing
-  test in this pass — flagged as plausible, not confirmed, unlike the items
-  above which were each verified failing before being fixed.
 - **R3, R8, R9, R10, R12, R13:** UI truthfulness details (stale cache on
-  reconnect, optimistic-append double-counting, unchecked confirm/delete
+  reconnect, optimistic-append double-counting, unchecked delete
   responses), input-validation hardening (size/origin/state-write
   protection), AI-call cost/status persistence, a SQLite migration path for
   already-deployed workspaces with the pre-policy schema, UI evidence-panel
@@ -166,11 +179,15 @@ honest disposition of each.
   list if this project continues.
 
 This section exists because publishing "everything works" after finding 15
-real issues and fixing 5 of them would be dishonest. The 5 fixed here were
-chosen because they were cheap to verify, cheap to fix, and either directly
-undermined this project's own thesis (S3 rule gap, chat-grounding regex) or
-were an outright functional bug (the UI loop). The rest are real work, not
-excuses.
+real issues and fixing only some of them would be dishonest. 8 of the 15
+findings (R1, R2, R4 partial, R5 partial, R6, R7, R11 partial, R15 partial)
+are fixed with regression tests where a Durable Object runtime isn't
+required to exercise them, and documented as untested where it is (R7).
+They were chosen because they were verifiable without deploying, and either
+directly undermined this project's own thesis (S3 rule gap, chat-grounding
+regex, policy false positives) or were an outright functional or security
+gap (the UI loop, the workspace race, the confirmable-without-previewing
+policy hole). The rest are real work, not excuses.
 
 ## Input limits (may reject a legitimate large plan)
 

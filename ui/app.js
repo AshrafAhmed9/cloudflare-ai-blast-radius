@@ -307,11 +307,17 @@ el.policyProposeBtn.addEventListener("click", async () => {
     </div>`;
   document.getElementById("policyConfirmBtn").addEventListener("click", async () => {
     if (!pendingProposal) return;
-    await fetch(`${AGENT_HTTP_BASE}/policy/confirm`, {
+    const confirmRes = await fetch(`${AGENT_HTTP_BASE}/policy/confirm`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sentence: pendingProposal.sentence, rule: pendingProposal.rule, proposalHash: pendingProposal.proposalHash }),
+      body: JSON.stringify({ proposalId: pendingProposal.proposalId }),
     });
+    if (!confirmRes.ok) {
+      const err = await confirmRes.json().catch(() => ({}));
+      el.policyProposal.innerHTML = `<div class="finding" style="border-color:var(--high)">Not saved: ${escapeHtml(err.error ?? `HTTP ${confirmRes.status}`)}</div>`;
+      pendingProposal = null;
+      return;
+    }
     el.policyProposal.innerHTML = `<div class="status">Saved. Applies to reviews submitted from now on.</div>`;
     el.policyInput.value = "";
     pendingProposal = null;

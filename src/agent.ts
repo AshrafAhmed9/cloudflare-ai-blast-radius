@@ -19,6 +19,7 @@ const MAX_CHANGED_RESOURCES = 200;
 const MAX_RETAINED_REVIEWS = 20;
 const MAX_CHAT_MESSAGE_CHARS = 2000;
 const MAX_RETAINED_POLICIES = 30;
+const PROPOSAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 export interface ReviewSummary {
   id: string;
@@ -49,6 +50,14 @@ interface PolicyRow {
   rule_json: string;
   created_at: string;
   proposal_hash: string;
+}
+
+interface ProposalRow {
+  id: string;
+  sentence: string;
+  rule_json: string;
+  created_at: string;
+  expires_at: string;
 }
 
 interface MessageRow {
@@ -94,6 +103,21 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       rule_json TEXT NOT NULL,
       created_at TEXT NOT NULL,
       proposal_hash TEXT NOT NULL
+    )`;
+    // R7 (adversarial review): a policy proposal used to be confirmed by a
+    // client-recomputable SHA-256 hash of (sentence, rule) — stateless and
+    // public, so a client could call /policy/confirm directly with a hash
+    // it computed itself, skipping /policy/propose (and its dry-run/model
+    // compile step) entirely. This table makes propose the only way to
+    // produce something confirm will accept: confirm now takes an opaque
+    // server-issued id and reads the sentence/rule it names from here,
+    // never from the client's request body.
+    this.sql`CREATE TABLE IF NOT EXISTS policy_proposals (
+      id TEXT PRIMARY KEY,
+      sentence TEXT NOT NULL,
+      rule_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
     )`;
   }
 
@@ -266,8 +290,10 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
   }
 
   /** POST /policy/propose { sentence, reviewId? } — compiles and dry-runs a
-   *  candidate policy WITHOUT persisting it. Returns a proposalHash the
-   *  client must echo back unchanged to /policy/confirm. */
+   *  candidate policy WITHOUT persisting it as an enforced policy. Stores
+   *  the compiled (sentence, rule) server-side under an opaque id with a
+   *  short TTL and returns that id — the only thing /policy/confirm will
+   *  accept (R7). */
   private async handlePolicyPropose(request: Request): Promise<Response> {
     let body: { sentence?: string; reviewId?: string };
     try {
@@ -284,8 +310,6 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       return Response.json({ ok: false, reason: compiled.reason });
     }
 
-    const hash = await proposalHash(body.sentence, compiled.rule);
-
     let dryRun: { resourceId: string; result: string }[] = [];
     const targetReviewId = body.reviewId ?? this.state.activeReviewId ?? undefined;
     if (targetReviewId) {
@@ -293,38 +317,67 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       if (result) dryRun = evaluatePolicyAgainstFacts(compiled.rule, result.facts);
     }
 
-    return Response.json({ ok: true, sentence: body.sentence, rule: compiled.rule, proposalHash: hash, dryRun });
+    this.pruneExpiredProposals();
+    const proposalId = crypto.randomUUID();
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + PROPOSAL_TTL_MS);
+    this.sql`INSERT INTO policy_proposals (id, sentence, rule_json, created_at, expires_at)
+      VALUES (${proposalId}, ${body.sentence}, ${JSON.stringify(compiled.rule)}, ${createdAt.toISOString()}, ${expiresAt.toISOString()})`;
+
+    return Response.json({
+      ok: true,
+      proposalId,
+      sentence: body.sentence,
+      rule: compiled.rule,
+      dryRun,
+      expiresAt: expiresAt.toISOString(),
+    });
   }
 
-  /** POST /policy/confirm { sentence, rule, proposalHash } — persists only
-   *  if the recomputed hash matches, so an edited proposal can't reuse an
-   *  earlier approval (PLAN.md §6). Idempotent on proposalHash: confirming
-   *  the same proposal twice returns the existing stored policy. */
+  private pruneExpiredProposals() {
+    this.sql`DELETE FROM policy_proposals WHERE expires_at < ${new Date().toISOString()}`;
+  }
+
+  /** POST /policy/confirm { proposalId } — persists the policy exactly as it
+   *  was compiled and previewed at /policy/propose, read server-side by id;
+   *  the sentence and compiled rule are never taken from the client's
+   *  request body (R7). This is what actually stops someone from skipping
+   *  the compile/dry-run step: a client can no longer construct a valid
+   *  confirmation on its own, because the only thing it supplies is an
+   *  opaque id it did not choose. The proposal is consumed (deleted) on use,
+   *  so it cannot be confirmed twice, and it expires after
+   *  `PROPOSAL_TTL_MS` so a stale preview can't be confirmed against a plan
+   *  the user no longer has open. */
   private async handlePolicyConfirm(request: Request): Promise<Response> {
-    let body: { sentence?: string; rule?: unknown; proposalHash?: string };
+    let body: { proposalId?: string };
     try {
       body = await request.json();
     } catch {
-      return Response.json({ error: "Request body must be JSON: { sentence, rule, proposalHash }." }, { status: 400 });
+      return Response.json({ error: "Request body must be JSON: { proposalId }." }, { status: 400 });
     }
-    if (typeof body.sentence !== "string" || typeof body.proposalHash !== "string" || !body.rule) {
-      return Response.json({ error: "sentence, rule, and proposalHash are all required." }, { status: 400 });
-    }
-
-    const ruleResult = PolicyRuleSchema.safeParse(body.rule);
-    if (!ruleResult.success) {
-      return Response.json({ error: "rule failed schema validation — re-propose rather than hand-editing it." }, { status: 422 });
+    if (typeof body.proposalId !== "string" || !body.proposalId) {
+      return Response.json({ error: "proposalId is required — call /policy/propose first." }, { status: 400 });
     }
 
-    const recomputed = await proposalHash(body.sentence, ruleResult.data);
-    if (recomputed !== body.proposalHash) {
+    this.pruneExpiredProposals();
+    const proposal = this.sql<ProposalRow>`SELECT * FROM policy_proposals WHERE id = ${body.proposalId}`[0];
+    if (!proposal) {
       return Response.json(
-        { error: "proposalHash does not match the recomputed hash of sentence+rule. The proposal was edited after preview — re-propose it." },
-        { status: 409 },
+        { error: "No such proposal, or it expired. Call /policy/propose again to preview a fresh one." },
+        { status: 404 },
       );
     }
 
-    const existing = this.sql<PolicyRow>`SELECT * FROM policies WHERE proposal_hash = ${recomputed}`[0];
+    const ruleResult = PolicyRuleSchema.safeParse(JSON.parse(proposal.rule_json));
+    if (!ruleResult.success) {
+      // Should be unreachable — the row was written from a schema-validated
+      // compile result — but never persist an unvalidated rule regardless.
+      return Response.json({ error: "Stored proposal failed schema validation." }, { status: 500 });
+    }
+
+    const proposalHashForDedupe = await proposalHash(proposal.sentence, ruleResult.data);
+    const existing = this.sql<PolicyRow>`SELECT * FROM policies WHERE proposal_hash = ${proposalHashForDedupe}`[0];
+    this.sql`DELETE FROM policy_proposals WHERE id = ${body.proposalId}`;
     if (existing) {
       return Response.json({ id: existing.id, sentence: existing.sentence, rule: JSON.parse(existing.rule_json), deduped: true });
     }
@@ -332,14 +385,14 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     const id = crypto.randomUUID();
     const createdAt = new Date().toISOString();
     this.sql`INSERT INTO policies (id, sentence, rule_json, created_at, proposal_hash)
-      VALUES (${id}, ${body.sentence}, ${JSON.stringify(ruleResult.data)}, ${createdAt}, ${recomputed})`;
+      VALUES (${id}, ${proposal.sentence}, ${proposal.rule_json}, ${createdAt}, ${proposalHashForDedupe})`;
 
     const all = this.sql<{ id: string }>`SELECT id FROM policies ORDER BY created_at DESC`;
     for (const row of all.slice(MAX_RETAINED_POLICIES)) {
       this.sql`DELETE FROM policies WHERE id = ${row.id}`;
     }
 
-    return Response.json({ id, sentence: body.sentence, rule: ruleResult.data, deduped: false });
+    return Response.json({ id, sentence: proposal.sentence, rule: ruleResult.data, deduped: false });
   }
 
   private handleListPolicies(): Response {

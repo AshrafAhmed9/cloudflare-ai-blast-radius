@@ -187,10 +187,9 @@ covering what was fixed versus deliberately deferred. In short: the reference
 graph only resolves single-instance, root-module resources (count/for_each
 and nested modules are reported as unresolved, not guessed); the rule pack
 covers 6 resource types; replacement causes are only shown when Terraform's
-plan JSON itself provides them; the policy-confirm step trusts a
-client-recomputable hash rather than a server-issued opaque proposal token,
-so it binds an *edited* proposal to its preview but doesn't stop someone from
-skipping the preview step entirely (see R7 in the linked backlog).
+plan JSON itself provides them; the policy-confirm step is now bound to a
+server-issued opaque proposal id (R7 fixed) but that fix has no automated
+test yet, since it needs the real Durable Object runtime to exercise.
 
 ## Status
 
@@ -204,33 +203,34 @@ Honest, as of this commit:
   response-shape bug in the policy compiler were both found and fixed by
   actually running this live, not assumed away — see `docs/decisions.md`
   and the Results section above.
-- **Adversarial review found and this pass fixed 7 real bugs**, each with a
-  regression test proving it: a genuine infinite-request loop in the browser
-  client that never settled once any review existed (caught with a test
-  that loads the real `ui/app.js` and fails against the old code, passes
-  against the fix); a workspace-identity race where the client fired its
-  WebSocket and its first fetches independently, letting a cookie-less first
-  visit split across two Durable Object instances (fixed with a single
-  awaited `/api/bootstrap` step before anything else connects); an S3 bucket
-  rule that only matched plain deletion, not replacement, silently missing
-  the exact "silent failure" shape this project is built to catch;
-  `action_reason` read from the wrong location in Terraform's JSON schema
-  (always silently `undefined`); two resource-address-matching bugs in the
-  chat grounding verifier (indexed addresses like `aws_instance.web[0]`
-  losing their bracket, module-qualified addresses like
-  `module.prod.aws_db_instance.main` truncated to their last two segments —
-  both confirmed with `node -e` against the live regex before fixing); and a
-  policy-predicate path matcher that used substring matching, so a predicate
-  like `"id"` matched paths like `identifier`, producing false-positive
-  policy findings.
-- **Not fixed, deliberately deferred, tracked honestly:** a real design gap
-  where policy confirmation trusts a client-recomputable hash rather than a
-  server-issued proposal token; several input-validation and
-  observability hardening items; a SQLite schema-migration path for
-  existing deployed workspaces; `bench/` accuracy measurement against a
-  larger real-plan corpus; a held-out policy-compiler evaluation set; a
-  delete-workspace endpoint. Full itemized list with severity and reasoning
-  in `docs/limitations.md`.
+- **Adversarial review found 15 issues; this pass fixed 8**, each with a
+  regression test where one didn't require a live Durable Object to
+  exercise: a genuine infinite-request loop in the browser client that
+  never settled once any review existed; a workspace-identity race where
+  the client fired its WebSocket and its first fetches independently,
+  letting a cookie-less first visit split across two Durable Object
+  instances (fixed with a single awaited `/api/bootstrap` step); an S3
+  bucket rule that only matched plain deletion, not replacement; a policy
+  confirmation endpoint that trusted a client-recomputable hash rather than
+  a server-issued proposal — a client could call `/policy/confirm` directly
+  with a self-computed hash, skipping the compile/dry-run step entirely
+  (fixed with a server-side `policy_proposals` table keyed by opaque UUID
+  and a 10-minute TTL; not yet covered by an automated test — see
+  `docs/limitations.md`); `action_reason` read from the wrong location in
+  Terraform's JSON schema; two resource-address-matching bugs in the chat
+  grounding verifier (indexed and module-qualified addresses, both
+  confirmed with `node -e` against the live regex before fixing); and a
+  policy-predicate path matcher that used substring matching, so a
+  predicate like `"id"` matched paths like `identifier`, producing
+  false-positive policy findings.
+- **Not fixed, deliberately deferred, tracked honestly:** several
+  input-validation and observability hardening items (size/origin/AI-status
+  persistence); a SQLite schema-migration path for existing deployed
+  workspaces predating the policy tables; `bench/` accuracy measurement
+  against a larger real-plan corpus; a held-out policy-compiler evaluation
+  set; a delete-workspace endpoint; a real Workers-runtime integration test
+  harness. Full itemized list with severity and reasoning in
+  `docs/limitations.md`.
 
 ## Repository layout
 
