@@ -1,0 +1,238 @@
+// Vanilla JS client. No build step, no framework — see PLAN.md §5 ("choose
+// the simplest client supported by the current SDK"); a plain WebSocket +
+// fetch is simplest here since the UI surface is small.
+
+const AGENT_HTTP_BASE = "/agents/review-agent/workspace"; // "workspace" segment is overwritten server-side (see worker.ts)
+const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + AGENT_HTTP_BASE;
+
+const el = {
+  status: document.getElementById("status"),
+  submitBtn: document.getElementById("submitBtn"),
+  submitStatus: document.getElementById("submitStatus"),
+  planInput: document.getElementById("planInput"),
+  fileInput: document.getElementById("fileInput"),
+  reviewList: document.getElementById("reviewList"),
+  report: document.getElementById("report"),
+  chatLog: document.getElementById("chatLog"),
+  chatEmpty: document.getElementById("chatEmpty"),
+  chatForm: document.getElementById("chatForm"),
+  chatInput: document.getElementById("chatInput"),
+  chatSend: document.getElementById("chatSend"),
+};
+
+let ws = null;
+let wsReady = false;
+let activeReviewId = null;
+let activeResult = null;
+const reviewCache = new Map(); // reviewId -> { result, messages }
+
+function connectWebSocket() {
+  ws = new WebSocket(WS_URL);
+  ws.addEventListener("open", () => {
+    wsReady = true;
+    el.status.textContent = "connected";
+  });
+  ws.addEventListener("close", () => {
+    wsReady = false;
+    el.status.textContent = "disconnected — retrying…";
+    setTimeout(connectWebSocket, 2000);
+  });
+  ws.addEventListener("error", () => {
+    el.status.textContent = "connection error";
+  });
+  ws.addEventListener("message", (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      handleServerMessage(data);
+    } catch {
+      // ignore malformed frames
+    }
+  });
+}
+
+function handleServerMessage(data) {
+  if (data.type === "message" && data.reviewId) {
+    const cache = reviewCache.get(data.reviewId);
+    if (cache) cache.messages = [...(cache.messages ?? []), data.message];
+    if (data.reviewId === activeReviewId) appendChatBubble(data.message);
+  }
+}
+
+function severityBadge(sev) {
+  return `<span class="badge ${sev}">${sev}</span>`;
+}
+
+function renderReport(result) {
+  if (!result) {
+    el.report.innerHTML = `<div class="empty-state">No review selected yet.</div>`;
+    return;
+  }
+  if (result.facts.length === 0) {
+    el.report.innerHTML = `<div class="empty-state">Plan parsed successfully — no resource changes present.</div>`;
+    return;
+  }
+  const parts = [];
+  if (result.warnings?.length) {
+    parts.push(`<div class="finding" style="border-color:var(--notable)">${result.warnings.map(escapeHtml).join("<br/>")}</div>`);
+  }
+  const findingsByResource = new Map();
+  for (const f of result.findings) {
+    const list = findingsByResource.get(f.resourceId) ?? [];
+    list.push(f);
+    findingsByResource.set(f.resourceId, list);
+  }
+  const coverageByResource = new Map(result.coverage.map((c) => [c.resourceId, c]));
+  const dependents = result.dependents ?? {};
+
+  for (const fact of result.facts) {
+    const findings = findingsByResource.get(fact.id) ?? [];
+    const cov = coverageByResource.get(fact.id);
+    const deps = dependents[fact.id] ?? [];
+    const topSeverity = findings.some((f) => f.severity === "high") ? "high" : findings.some((f) => f.severity === "notable") ? "notable" : null;
+
+    parts.push(`
+      <div class="resource">
+        <div class="addr">${escapeHtml(fact.address)}
+          <span class="badge info">${escapeHtml(fact.plannedAction)}</span>
+          ${topSeverity ? severityBadge(topSeverity) : ""}
+          <span class="badge coverage">coverage: ${escapeHtml(cov?.status ?? "unknown")}</span>
+        </div>
+        ${fact.plannedAction.startsWith("replace") && !fact.replacementCauseAvailable
+          ? `<div class="finding">Replacement cause unavailable in the plan JSON — not treated as known.</div>`
+          : ""}
+        ${fact.replacePaths.map((p) => `<div class="evidence">replace_path: ${escapeHtml(p.path)}</div>`).join("")}
+        ${findings.map((f) => `<div class="finding">${severityBadge(f.severity)} ${escapeHtml(f.message)} <span class="evidence">(rule=${escapeHtml(f.ruleId)})</span></div>`).join("")}
+        ${deps.length ? `<div class="evidence">referenced by: ${deps.map((d) => `${escapeHtml(d.resourceId)} (${d.relationship})`).join(", ")}</div>` : ""}
+      </div>
+    `);
+  }
+
+  if (result.unresolvedReferences?.length) {
+    parts.push(`<div class="empty-state">${result.unresolvedReferences.length} reference(s) not resolved — not assumed to be edges.</div>`);
+  }
+
+  el.report.innerHTML = parts.join("");
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+function renderReviewList(reviews) {
+  el.reviewList.innerHTML = "";
+  if (!reviews || reviews.length === 0) {
+    el.reviewList.innerHTML = `<span class="status">No reviews yet in this workspace.</span>`;
+    return;
+  }
+  for (const r of reviews) {
+    const btn = document.createElement("button");
+    btn.textContent = `${r.label} — ${r.highCount} high, ${r.notableCount} notable`;
+    if (r.id === activeReviewId) btn.classList.add("primary");
+    btn.addEventListener("click", () => selectReview(r.id));
+    el.reviewList.appendChild(btn);
+  }
+}
+
+function appendChatBubble(message) {
+  el.chatEmpty.hidden = true;
+  const div = document.createElement("div");
+  div.className = `msg ${message.role}`;
+  div.textContent = message.content;
+  el.chatLog.appendChild(div);
+  el.chatLog.scrollTop = el.chatLog.scrollHeight;
+}
+
+async function fetchWorkspaceState() {
+  const res = await fetch(`${AGENT_HTTP_BASE}/reviews`);
+  if (!res.ok) return;
+  const state = await res.json();
+  renderReviewList(state.reviews);
+  if (state.activeReviewId) selectReview(state.activeReviewId);
+}
+
+async function selectReview(reviewId) {
+  activeReviewId = reviewId;
+  let cache = reviewCache.get(reviewId);
+  if (!cache) {
+    const res = await fetch(`${AGENT_HTTP_BASE}/review/${encodeURIComponent(reviewId)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    cache = { result: data.result, messages: data.messages ?? [] };
+    reviewCache.set(reviewId, cache);
+  }
+  activeResult = cache.result;
+  renderReport(activeResult);
+  el.chatLog.innerHTML = "";
+  el.chatEmpty.hidden = cache.messages.length > 0;
+  if (cache.messages.length === 0) el.chatLog.appendChild(el.chatEmpty);
+  for (const m of cache.messages) appendChatBubble(m);
+  el.chatInput.disabled = false;
+  el.chatSend.disabled = false;
+  if (ws && wsReady) ws.send(JSON.stringify({ type: "set_active", reviewId }));
+  await fetchWorkspaceState().catch(() => {});
+}
+
+async function submitPlan(planText, label) {
+  let plan;
+  try {
+    plan = JSON.parse(planText);
+  } catch {
+    el.submitStatus.textContent = "Not valid JSON.";
+    return;
+  }
+  el.submitBtn.disabled = true;
+  el.submitStatus.textContent = "Analyzing…";
+  try {
+    const res = await fetch(`${AGENT_HTTP_BASE}/review`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ plan, idempotencyKey: crypto.randomUUID(), label }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      el.submitStatus.textContent = data.error ?? `Request failed (${res.status}).`;
+      return;
+    }
+    el.submitStatus.textContent = "Done.";
+    reviewCache.set(data.reviewId, { result: data.result, messages: [] });
+    await selectReview(data.reviewId);
+  } catch (err) {
+    el.submitStatus.textContent = `Network error: ${err.message}`;
+  } finally {
+    el.submitBtn.disabled = false;
+  }
+}
+
+el.submitBtn.addEventListener("click", () => {
+  submitPlan(el.planInput.value, "Uploaded plan");
+});
+
+el.fileInput.addEventListener("change", async () => {
+  const file = el.fileInput.files?.[0];
+  if (!file) return;
+  el.planInput.value = await file.text();
+});
+
+document.querySelectorAll("button[data-sample]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const name = btn.getAttribute("data-sample");
+    const res = await fetch(`/samples/${name}.json`);
+    const text = await res.text();
+    el.planInput.value = text;
+    await submitPlan(text, btn.textContent);
+  });
+});
+
+el.chatForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = el.chatInput.value.trim();
+  if (!text || !activeReviewId || !ws || !wsReady) return;
+  appendChatBubble({ role: "user", content: text });
+  ws.send(JSON.stringify({ type: "chat", reviewId: activeReviewId, text }));
+  el.chatInput.value = "";
+});
+
+connectWebSocket();
+fetchWorkspaceState().catch(() => {
+  el.status.textContent = "no reviews yet";
+});
