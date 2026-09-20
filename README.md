@@ -73,7 +73,7 @@ why D1 wasn't added — both are real tradeoffs, not omissions.
 nvm install 22 && nvm use 22   # wrangler 4.x requires Node >= 22
 npm install --legacy-peer-deps # see docs/decisions.md for the one dependency conflict this bypasses
 npm run typecheck
-npm test                       # 75 tests, all offline, no network
+npm test                       # 77 tests, all offline, no network
 npm run cli -- ui/samples/replace-db.json
 npm run cli -- ui/samples/ordinary-update.json
 npm run cli -- ui/samples/incomplete-evidence.json
@@ -135,20 +135,23 @@ agent.ts — ReviewAgent (Agents SDK, one instance per workspace)
 ```
 
 `src/core/` has zero network dependency — it's the same code the CLI runs.
-The model never sees raw plan values (sanitize.ts redacts sensitive paths
-first) and can never change a finding — see `docs/decisions.md`.
+The model never sees raw plan values — `ResourceChangeFact` never carries a
+resource's raw before/after values to begin with, only addresses, types,
+actions, and evidence *paths* (see `src/core/sanitize.ts`) — and the model
+can never change a finding — see `docs/decisions.md`.
 
 ## Results
 
 Offline, deterministic, reproduced by `npm test`:
 
-- **75 unit tests, 0 failures** — parser (10), analyze orchestrator (7),
-  reference graph (6), rule pack (12), sanitize/redaction (6), AI
-  context/verify (9), policy interpreter's three-valued logic (11), policy
-  compiler including two real bugs it caught (9), proposal-hash binding (4),
-  and a browser-client regression test that loads the actual `ui/app.js`
-  against stubbed fetch/DOM to prove a real infinite-request-loop bug (found
-  by adversarial review) stays fixed (1).
+- **77 unit tests, 0 failures** — parser (10), analyze orchestrator (7),
+  reference graph (6), rule pack (12), fact isolation (1), AI context/verify
+  (9), policy interpreter's three-valued logic including exact-segment path
+  matching (14), policy compiler including two real bugs it caught (9),
+  proposal-hash binding (4), a worker-level bootstrap/cookie test against the
+  real exported handler (4), and a browser-client regression test that loads
+  the actual `ui/app.js` against stubbed fetch/DOM to prove a real
+  infinite-request-loop bug (found by adversarial review) stays fixed (1).
 - All three sample plans (`ui/samples/*.json`) produce the exact output shown
   at the top of this README and in [`docs/limitations.md`](docs/limitations.md).
 
@@ -195,25 +198,31 @@ Honest, as of this commit:
 
 - **Built, deployed, and verified live:** deterministic core, rule pack,
   reference graph, policy compiler, chat — all confirmed against the real
-  running app at the URL above, not just mocked tests. 75 passing offline
+  running app at the URL above, not just mocked tests. 77 passing offline
   tests, clean typecheck, CI green. `wrangler deploy` succeeded; a real
   packaging bug in the `agents@0.24.0` dependency and a real Workers AI
   response-shape bug in the policy compiler were both found and fixed by
   actually running this live, not assumed away — see `docs/decisions.md`
   and the Results section above.
-- **Adversarial review found and this pass fixed 5 real bugs**, each with a
+- **Adversarial review found and this pass fixed 7 real bugs**, each with a
   regression test proving it: a genuine infinite-request loop in the browser
   client that never settled once any review existed (caught with a test
   that loads the real `ui/app.js` and fails against the old code, passes
-  against the fix); an S3 bucket rule that only matched plain deletion, not
-  replacement, silently missing the exact "silent failure" shape this
-  project is built to catch; `action_reason` read from the wrong location
-  in Terraform's JSON schema (always silently `undefined`); and two
-  resource-address-matching bugs in the chat grounding verifier (indexed
-  addresses like `aws_instance.web[0]` losing their bracket, module-qualified
-  addresses like `module.prod.aws_db_instance.main` truncated to their last
-  two segments) — both confirmed with `node -e` against the live regex
-  before fixing.
+  against the fix); a workspace-identity race where the client fired its
+  WebSocket and its first fetches independently, letting a cookie-less first
+  visit split across two Durable Object instances (fixed with a single
+  awaited `/api/bootstrap` step before anything else connects); an S3 bucket
+  rule that only matched plain deletion, not replacement, silently missing
+  the exact "silent failure" shape this project is built to catch;
+  `action_reason` read from the wrong location in Terraform's JSON schema
+  (always silently `undefined`); two resource-address-matching bugs in the
+  chat grounding verifier (indexed addresses like `aws_instance.web[0]`
+  losing their bracket, module-qualified addresses like
+  `module.prod.aws_db_instance.main` truncated to their last two segments —
+  both confirmed with `node -e` against the live regex before fixing); and a
+  policy-predicate path matcher that used substring matching, so a predicate
+  like `"id"` matched paths like `identifier`, producing false-positive
+  policy findings.
 - **Not fixed, deliberately deferred, tracked honestly:** a real design gap
   where policy confirmation trusts a client-recomputable hash rather than a
   server-issued proposal token; several input-validation and
@@ -237,7 +246,7 @@ src/core/               parse, sanitize, rules, graph, analyze — pure TS, no n
 src/ai/                 context building, Workers AI call, grounding verifier
 src/policies/           policy DSL, three-valued interpreter, English-to-rule compiler, proposal hashing
 ui/                     browser client (plain HTML/CSS/JS) + sample plans
-test/                   33 offline unit tests (vitest)
+test/                   77 offline unit tests (vitest)
 docs/decisions.md       the actual tradeoffs and why
 docs/limitations.md     what this tool cannot tell you
 prompts/                raw exported prompt history

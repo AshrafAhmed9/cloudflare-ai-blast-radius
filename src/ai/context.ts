@@ -1,9 +1,10 @@
-// Builds the bounded, sanitized text context the model is given. The model
-// never receives raw plan values — only what analyze.ts already extracted
-// (facts, findings, coverage, dependents), which sanitize.ts has already
-// redacted. This module also caps context size so a huge plan degrades
-// (fewer resources described, said explicitly) rather than silently
-// truncating without telling anyone.
+// Builds the bounded text context the model is given. The model never
+// receives raw plan values — only what analyze.ts already extracted (facts,
+// findings, coverage, dependents), and ResourceChangeFact never carries a
+// resource's raw before/after values to begin with (see sanitize.ts). This
+// module also caps context size so a huge plan degrades (fewer resources
+// described, said explicitly) rather than silently truncating without
+// telling anyone.
 
 import type { AnalysisResult } from "../core/types.js";
 

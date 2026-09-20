@@ -14,6 +14,20 @@ function actionMatches(rule: PolicyRule, fact: ResourceChangeFact): boolean {
   return rule.actions.includes(fact.plannedAction as PolicyRule["actions"][number]);
 }
 
+/** Exact match against the whole path, or against one whole dot/bracket
+ *  segment of it — never a substring match. R6 (adversarial review): the
+ *  previous `.includes()` check meant a predicate value like "id" matched
+ *  paths like "identifier" or "availability_zone_id", and "engine" matched
+ *  "engine_version" — false positives a user's English policy sentence
+ *  never intended. "tags[0].value" splits to ["tags", "0", "value"], so a
+ *  predicate of "value" still matches a nested leaf; "id" no longer
+ *  matches "identifier". */
+function pathMatchesPredicate(path: string, value: string): boolean {
+  if (path === value) return true;
+  const segments = path.split(/[.[\]]+/).filter(Boolean);
+  return segments.includes(value);
+}
+
 /** Evaluates the attribute predicate, if any. Returns null when there's no
  *  predicate (nothing further to check — the type/action match already
  *  decided it), or a three-valued result when there is one. */
@@ -26,12 +40,12 @@ function predicateMatches(rule: PolicyRule, fact: ResourceChangeFact): PolicyMat
     // genuinely don't know whether the predicate's attribute was involved.
     const isReplacement = fact.plannedAction === "replace-delete-first" || fact.plannedAction === "replace-create-first";
     if (isReplacement && !fact.replacementCauseAvailable) return "unknown";
-    const found = fact.replacePaths.some((p) => p.path.includes(predicate.value));
+    const found = fact.replacePaths.some((p) => pathMatchesPredicate(p.path, predicate.value));
     return found ? "match" : "no-match";
   }
 
   if (predicate.kind === "unknown_path_includes") {
-    const found = fact.unknownPaths.some((p) => p.includes(predicate.value));
+    const found = fact.unknownPaths.some((p) => pathMatchesPredicate(p, predicate.value));
     return found ? "match" : "no-match";
   }
 

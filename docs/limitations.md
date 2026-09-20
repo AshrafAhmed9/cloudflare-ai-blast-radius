@@ -114,6 +114,20 @@ honest disposition of each.
   addresses to their last two segments. Verified both failures with a
   standalone `node -e` regex test before fixing, then added regression
   tests for indexed, module-qualified, and data-source addresses.
+- **R6 (policy predicate path matching, confirmed and fixed):** the path
+  predicate interpreter used `.includes()` — a substring check — so a
+  predicate value like `"id"` matched paths like `identifier` or
+  `availability_zone_id`, and `"engine"` matched `engine_version`. A user's
+  English policy sentence compiled correctly but then matched resources it
+  shouldn't have. Fixed with exact whole-path or whole-segment matching in
+  `src/policies/interpret.ts`; `test/policy-interpret.test.ts` covers both
+  the false-positive cases and that a legitimate nested-leaf match (e.g.
+  `tags[0].value` matching predicate `"value"`) still works. Also removed
+  `redactValue` from `src/core/sanitize.ts` — it was dead code (unused in
+  production) that implied an active-redaction step that doesn't exist;
+  `ResourceChangeFact` never carries raw resource values to begin with, so
+  there's nothing to redact. README and `src/ai/context.ts` updated to
+  describe the real guarantee (omission by construction, not redaction).
 - **R15 partial (misleading CI example):** the README's one-line CLI usage
   example (`cmd || test $? -eq 1 && echo ...`) always exits 0 regardless of
   the underlying finding, due to shell operator grouping — meaning it would
@@ -140,16 +154,16 @@ honest disposition of each.
   could race on a cookie-less first visit. Not reproduced with a failing
   test in this pass — flagged as plausible, not confirmed, unlike the items
   above which were each verified failing before being fixed.
-- **R3, R6, R8, R9, R10, R12, R13:** UI truthfulness details (stale cache on
+- **R3, R8, R9, R10, R12, R13:** UI truthfulness details (stale cache on
   reconnect, optimistic-append double-counting, unchecked confirm/delete
-  responses), policy-predicate path-semantics edge cases, input-validation
-  hardening (size/origin/state-write protection), AI-call cost/status
-  persistence, a SQLite migration path for already-deployed workspaces with
-  the pre-policy schema, UI evidence-panel polish, and a real `bench/`
-  harness with Workers-runtime integration tests. Each is a real, legitimate
-  gap the review correctly identified; none were reproduced with a failing
-  test or fixed in this pass given remaining time. Treat `SUBMISSION_REVIEW.md`
-  as the authoritative task list if this project continues.
+  responses), input-validation hardening (size/origin/state-write
+  protection), AI-call cost/status persistence, a SQLite migration path for
+  already-deployed workspaces with the pre-policy schema, UI evidence-panel
+  polish, and a real `bench/` harness with Workers-runtime integration
+  tests. Each is a real, legitimate gap the review correctly identified;
+  none were reproduced with a failing test or fixed in this pass given
+  remaining time. Treat `SUBMISSION_REVIEW.md` as the authoritative task
+  list if this project continues.
 
 This section exists because publishing "everything works" after finding 15
 real issues and fixing 5 of them would be dishonest. The 5 fixed here were

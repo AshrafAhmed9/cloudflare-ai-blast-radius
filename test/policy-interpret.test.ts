@@ -78,6 +78,26 @@ describe("evaluatePolicy — replace_path_includes predicate (three-valued)", ()
   });
 });
 
+describe("evaluatePolicy — path predicate is exact-segment, not substring (R6)", () => {
+  it("does not match 'id' against a path merely containing it, like 'identifier'", () => {
+    const r = rule({ attributePredicate: { kind: "replace_path_includes", value: "id" } });
+    const f = fact({ replacePaths: [{ path: "identifier", unknown: false }], replacementCauseAvailable: true });
+    expect(evaluatePolicy(r, f)).toBe("no-match");
+  });
+
+  it("does not match 'engine' against 'engine_version'", () => {
+    const r = rule({ attributePredicate: { kind: "replace_path_includes", value: "engine" } });
+    const f = fact({ replacePaths: [{ path: "engine_version", unknown: false }], replacementCauseAvailable: true });
+    expect(evaluatePolicy(r, f)).toBe("no-match");
+  });
+
+  it("still matches a whole leaf segment inside a nested/indexed path", () => {
+    const r = rule({ attributePredicate: { kind: "replace_path_includes", value: "value" } });
+    const f = fact({ replacePaths: [{ path: "tags[0].value", unknown: false }], replacementCauseAvailable: true });
+    expect(evaluatePolicy(r, f)).toBe("match");
+  });
+});
+
 describe("evaluatePolicy — unknown_path_includes predicate", () => {
   it("matches when the value appears in unknownPaths", () => {
     const r = rule({ attributePredicate: { kind: "unknown_path_includes", value: "id" } });
