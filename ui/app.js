@@ -105,14 +105,28 @@ function renderReport(result, policyFindings) {
   const coverageByResource = new Map(result.coverage.map((c) => [c.resourceId, c]));
   const dependents = result.dependents ?? {};
 
-  for (const fact of result.facts) {
+  // R12 (adversarial review): resources rendered in plan order, so the one
+  // high-severity finding in a 40-resource plan could be scrolled past
+  // entirely. Sort by worst finding first (high, then notable, then none),
+  // stable otherwise so unrelated resources keep their original order.
+  const severityRank = { high: 0, notable: 1 };
+  const sortedFacts = [...result.facts].sort((a, b) => {
+    const rank = (id) => {
+      const fs = findingsByResource.get(id) ?? [];
+      const worst = fs.reduce((acc, f) => Math.min(acc, severityRank[f.severity] ?? 2), 2);
+      return worst;
+    };
+    return rank(a.id) - rank(b.id);
+  });
+
+  for (const fact of sortedFacts) {
     const findings = findingsByResource.get(fact.id) ?? [];
     const cov = coverageByResource.get(fact.id);
     const deps = dependents[fact.id] ?? [];
     const topSeverity = findings.some((f) => f.severity === "high") ? "high" : findings.some((f) => f.severity === "notable") ? "notable" : null;
 
     parts.push(`
-      <div class="resource">
+      <div class="resource" role="listitem">
         <div class="addr">${escapeHtml(fact.address)}
           <span class="badge info">${escapeHtml(fact.plannedAction)}</span>
           ${topSeverity ? severityBadge(topSeverity) : ""}
@@ -149,6 +163,7 @@ function renderReviewList(reviews) {
   for (const r of reviews) {
     const btn = document.createElement("button");
     btn.textContent = `${r.label} — ${r.highCount} high, ${r.notableCount} notable`;
+    btn.setAttribute("aria-pressed", String(r.id === activeReviewId));
     if (r.id === activeReviewId) btn.classList.add("primary");
     btn.addEventListener("click", () => selectReview(r.id));
     el.reviewList.appendChild(btn);

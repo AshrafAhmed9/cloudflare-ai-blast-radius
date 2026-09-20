@@ -18,7 +18,9 @@ const MAX_INPUT_BYTES = 1_048_576; // 1 MiB, per PLAN.md §7
 const MAX_CHANGED_RESOURCES = 200;
 const MAX_RETAINED_REVIEWS = 20;
 const MAX_CHAT_MESSAGE_CHARS = 2000;
+const MAX_WS_FRAME_BYTES = 8_192; // R8: cap the whole frame, not just the `text` field we eventually read out of it
 const MAX_RETAINED_POLICIES = 30;
+const MAX_AI_CALLS_PER_WORKSPACE = 500; // R9: a running budget beyond the per-call timeout
 const PROPOSAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const AI_CALL_TIMEOUT_MS = 20_000; // R9: bound every model call, never wait forever
 
@@ -132,6 +134,13 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     } catch {
       // Column already exists — already migrated, nothing to do.
     }
+    // R9: a single-row counter table for a running AI-call budget. Every
+    // call to Workers AI in this workspace (opening summary, chat) goes
+    // through `chargeAiCall()` below, which increments this and refuses
+    // once MAX_AI_CALLS_PER_WORKSPACE is hit — bounding cost beyond just
+    // the per-call timeout.
+    this.sql`CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY CHECK (id = 1), ai_calls INTEGER NOT NULL DEFAULT 0)`;
+    this.sql`INSERT OR IGNORE INTO usage (id, ai_calls) VALUES (1, 0)`;
     this.sql`CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
       review_id TEXT NOT NULL,
@@ -317,6 +326,10 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     // "still working on it" from "broke and gave up." summary_status makes
     // that honest, and the call itself is now bounded instead of able to
     // hang indefinitely on a stalled model request.
+    if (!this.chargeAiCall()) {
+      this.sql`UPDATE reviews SET summary_status = 'failed' WHERE id = ${reviewId}`;
+      return;
+    }
     try {
       const answer = await withTimeout(summarizeReview(this.env.AI, result), AI_CALL_TIMEOUT_MS);
       this.appendMessage(reviewId, "assistant", answer.note ? `${answer.text}\n\n${answer.note}` : answer.text);
@@ -325,6 +338,19 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       this.sql`UPDATE reviews SET summary_status = 'failed' WHERE id = ${reviewId}`;
       throw new Error("summary generation failed or timed out");
     }
+  }
+
+  /** Returns true and increments the counter if this workspace is still
+   *  under its AI-call budget; returns false (and charges nothing) once
+   *  it's exhausted. Every Workers AI call in this file goes through this
+   *  first — a stuck client or a chat loop can't run up an unbounded
+   *  inference bill against one workspace. */
+  private chargeAiCall(): boolean {
+    const row = this.sql<{ ai_calls: number }>`SELECT ai_calls FROM usage WHERE id = 1`[0];
+    const used = row?.ai_calls ?? 0;
+    if (used >= MAX_AI_CALLS_PER_WORKSPACE) return false;
+    this.sql`UPDATE usage SET ai_calls = ai_calls + 1 WHERE id = 1`;
+    return true;
   }
 
   private appendMessage(reviewId: string, role: "user" | "assistant", content: string) {
@@ -519,6 +545,14 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
 
   override async onMessage(connection: Connection, message: WSMessage) {
     if (typeof message !== "string") return;
+    // R8: cap the whole frame before parsing it, not just the `text` field
+    // we eventually slice out of it — a client (malicious or buggy) could
+    // otherwise send an arbitrarily large frame that costs a full
+    // JSON.parse over garbage before anything downstream ever looks at it.
+    if (message.length > MAX_WS_FRAME_BYTES) {
+      connection.send(JSON.stringify({ type: "error", error: "Message too large." }));
+      return;
+    }
     let parsed: { type?: string; reviewId?: string; text?: string };
     try {
       parsed = JSON.parse(message);
@@ -544,6 +578,15 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content }) as const);
       this.appendMessage(parsed.reviewId, "user", text);
+
+      if (!this.chargeAiCall()) {
+        this.appendMessage(
+          parsed.reviewId,
+          "assistant",
+          `This workspace has used its AI-call budget (${MAX_AI_CALLS_PER_WORKSPACE} calls). The deterministic findings above are unaffected.`,
+        );
+        return;
+      }
 
       let answer: Awaited<ReturnType<typeof askAboutReview>>;
       try {

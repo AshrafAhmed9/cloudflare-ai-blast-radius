@@ -39,6 +39,23 @@ function generateWorkspaceId(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** R8 (adversarial review): the workspace cookie is SameSite=Lax, which
+ *  already blocks a cross-site POST/DELETE from attaching it in modern
+ *  browsers — but that's a browser default, not something this server
+ *  enforces itself, and it's the only thing standing between "logged in
+ *  as this workspace" and "not." Reject any state-changing request whose
+ *  Origin header (when the browser sends one, which it does for
+ *  cross-origin fetches and most same-origin ones too) doesn't match this
+ *  Worker's own origin. A same-origin browser request always sends a
+ *  matching Origin or omits it (e.g. a plain top-level navigation, which
+ *  isn't how this API is ever called); a cross-site script's request
+ *  won't match. */
+function isTrustedOrigin(request: Request, workerOrigin: string): boolean {
+  const origin = request.headers.get("origin");
+  if (!origin) return true; // no Origin header: not a cross-origin fetch/XHR
+  return origin === workerOrigin;
+}
+
 function withWorkspaceCookie(response: Response, workspaceId: string): Response {
   const wrapped = new Response(response.body, response);
   wrapped.headers.append(
@@ -68,6 +85,13 @@ export default {
     }
 
     if (url.pathname.startsWith(AGENT_PATH_PREFIX)) {
+      if (
+        (request.method === "POST" || request.method === "DELETE" || request.method === "PUT") &&
+        !isTrustedOrigin(request, url.origin)
+      ) {
+        return Response.json({ error: "Cross-origin request rejected." }, { status: 403 });
+      }
+
       let workspaceId = getWorkspaceIdFromCookie(request);
       const isNew = !workspaceId;
       if (!workspaceId) workspaceId = generateWorkspaceId();

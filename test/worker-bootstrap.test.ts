@@ -67,3 +67,59 @@ describe("worker.ts — /api/bootstrap and cookie parsing", () => {
     expect(res.headers.get("set-cookie")).toBeNull(); // recognized the existing valid cookie, didn't reissue
   });
 });
+
+describe("worker.ts — cross-origin rejection on state-changing agent requests (R8)", () => {
+  it("rejects a POST to /agents/* whose Origin header doesn't match this Worker's own origin", async () => {
+    const worker = (await import("../src/worker.js")).default;
+    const id = "d".repeat(64);
+    const res = await worker.fetch(
+      new Request("https://example.workers.dev/agents/review-agent/x/review", {
+        method: "POST",
+        headers: { cookie: `br_workspace=${id}`, origin: "https://attacker.example" },
+        body: "{}",
+      }),
+      fakeEnv,
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("allows a same-origin POST to /agents/* through to routing", async () => {
+    const worker = (await import("../src/worker.js")).default;
+    const id = "e".repeat(64);
+    const res = await worker.fetch(
+      new Request("https://example.workers.dev/agents/review-agent/x/review", {
+        method: "POST",
+        headers: { cookie: `br_workspace=${id}`, origin: "https://example.workers.dev" },
+        body: "{}",
+      }),
+      fakeEnv,
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it("allows a POST with no Origin header (not a cross-origin fetch)", async () => {
+    const worker = (await import("../src/worker.js")).default;
+    const id = "f".repeat(64);
+    const res = await worker.fetch(
+      new Request("https://example.workers.dev/agents/review-agent/x/review", {
+        method: "POST",
+        headers: { cookie: `br_workspace=${id}` },
+        body: "{}",
+      }),
+      fakeEnv,
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it("does not block a GET to /agents/* (reads, and the WebSocket upgrade, are also GET)", async () => {
+    const worker = (await import("../src/worker.js")).default;
+    const id = "0".repeat(64);
+    const res = await worker.fetch(
+      new Request("https://example.workers.dev/agents/review-agent/x/reviews", {
+        headers: { cookie: `br_workspace=${id}`, origin: "https://attacker.example" },
+      }),
+      fakeEnv,
+    );
+    expect(res.status).not.toBe(403);
+  });
+});

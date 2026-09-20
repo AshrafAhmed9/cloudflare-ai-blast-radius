@@ -74,7 +74,7 @@ Offline, no credentials:
 nvm install 22 && nvm use 22   # wrangler 4.x needs Node >= 22
 npm install --legacy-peer-deps # see docs/decisions.md for the one dependency conflict this works around
 npm run typecheck
-npm test                       # 78 tests, no network
+npm test                       # 82 tests, no network
 npm run cli -- ui/samples/replace-db.json
 npm run cli -- ui/samples/ordinary-update.json
 npm run cli -- ui/samples/incomplete-evidence.json
@@ -141,7 +141,7 @@ model's output write back into a finding.
 
 Offline, reproduced by `npm test`:
 
-- **78 tests, 0 failures** across the parser, the deterministic analyzer, the
+- **82 tests, 0 failures** across the parser, the deterministic analyzer, the
   reference graph, the six-entry rule pack, the policy interpreter's
   three-valued logic, the policy compiler (including two real bugs it
   caught before this ever ran live), proposal hashing, a worker-level test
@@ -193,7 +193,7 @@ real bugs (a packaging issue in the `agents` dependency, and the Workers AI
 response-shape surprise above) were found and fixed by actually deploying,
 not by assuming it would work.
 
-An adversarial review pass found 15 issues. Eleven are fixed, most with a
+An adversarial review pass found 15 issues. Twelve are fixed, most with a
 regression test: an infinite-request loop in the browser client, a
 workspace-identity race on first visit, an S3 rule that missed
 replacements, a policy-confirmation endpoint that trusted a
@@ -204,12 +204,16 @@ matches, a chat client that double-rendered every message and lost replies
 on reconnect, a chat call that sent the current question to the model
 twice, and a schema that silently stayed stale for any workspace
 provisioned before a column was added. Also added: bounded (20s) AI calls
-instead of an unbounded hang, an honest per-review `summary_status` instead
-of a silently swallowed failure, and a `DELETE /workspace` endpoint. The
-rest is real gaps, tracked and not hidden, in `docs/limitations.md`: origin
-checks and request-size limits, a running AI-call budget beyond the
-per-call timeout, and a real benchmark harness (deliberately not padded
-with a 3-plan script that wouldn't measure anything new).
+with a per-workspace call budget instead of an unbounded hang or bill, an
+honest per-review `summary_status` instead of a silently swallowed
+failure, a `DELETE /workspace` endpoint, an Origin check on every
+state-changing request, a WebSocket frame size cap, findings sorted by
+severity instead of plan order, and a pass of `aria-live` regions, input
+labels, and keyboard focus states. The rest is real gaps, tracked and not
+hidden, in `docs/limitations.md`: rejecting generic client-state writes,
+an expandable per-resource evidence panel, and a real benchmark harness
+(deliberately not padded with a 3-plan script that wouldn't measure
+anything new).
 
 ## Layout
 
@@ -224,7 +228,7 @@ src/core/                  parse, sanitize, rules, graph, analyze — pure TS, n
 src/ai/                    context building, Workers AI call, grounding verifier
 src/policies/              policy DSL, three-valued interpreter, English-to-rule compiler, proposal hashing
 ui/                        browser client (plain HTML/CSS/JS) + sample plans
-test/                      78 offline unit tests (vitest)
+test/                      82 offline unit tests (vitest)
 docs/decisions.md          the actual tradeoffs and why
 docs/limitations.md        what this tool cannot tell you
 prompts/                   raw exported prompt history

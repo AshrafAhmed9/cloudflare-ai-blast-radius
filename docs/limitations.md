@@ -167,17 +167,26 @@ each.
 
 **Confirmed real, not fixed this pass — tracked, not hidden:**
 
-- **R8 partial:** two crashes were reproduced and fixed — `POST .../review`
-  with a JSON body that parses to `null` (or any non-object) threw instead
-  of returning 400, and a plan whose `configuration.root_module.resources`
-  is an object instead of an array threw `TypeError: resources is not
-  iterable` in the graph builder instead of degrading to "no resources."
-  Both are guarded now (`src/agent.ts`, `src/core/graph.ts`); the graph fix
-  has a regression test, the request-body fix doesn't yet, since exercising
-  it needs the real Durable Object request path (same gap as R7 — see
-  above). The rest of R8 — origin checks, size/depth limits on every
-  request and WS frame, rejecting generic client-state writes — is still
-  open.
+- **R8 (mostly fixed):** two crashes were reproduced and fixed — `POST
+  .../review` with a JSON body that parses to `null` (or any non-object)
+  threw instead of returning 400, and a plan whose
+  `configuration.root_module.resources` is an object instead of an array
+  threw `TypeError: resources is not iterable` in the graph builder instead
+  of degrading to "no resources." Both are guarded now (`src/agent.ts`,
+  `src/core/graph.ts`); the graph fix has a regression test, the
+  request-body fix doesn't yet, since exercising it needs the real Durable
+  Object request path (same gap as R7 — see above). Also added: an Origin
+  check on every state-changing (`POST`/`DELETE`/`PUT`) request to
+  `/agents/*` in `worker.ts`, rejecting a mismatched cross-origin request
+  with 403 (tested in `test/worker-bootstrap.test.ts`) — the workspace
+  cookie's `SameSite=Lax` already blocks this in modern browsers, but that
+  was a browser default this server wasn't itself enforcing; and a
+  hard size cap on every WebSocket frame (`MAX_WS_FRAME_BYTES` in
+  `src/agent.ts`), rejected before it's even parsed. Rejecting generic
+  client-state writes through the Agents SDK's `validateStateChange` hook
+  is still open — the only state this app writes through `setState` is
+  `{ reviews, activeReviewId }`, both server-computed, but that guard
+  hasn't been added explicitly yet.
 - **R3 (confirmed and fixed):** the chat client optimistically rendered the
   user's own message locally, then rendered it again when the server
   broadcast the persisted copy back — every question appeared twice.
@@ -203,7 +212,12 @@ each.
   message in the transcript instead of leaving the user staring at
   nothing, and a `summary_status` column (`pending`/`completed`/`failed`,
   returned from `GET /review/:id`) makes the opening-summary outcome
-  inspectable instead of invisible.
+  inspectable instead of invisible. Also added a running budget: a
+  per-workspace `usage` counter (`chargeAiCall()` in `src/agent.ts`) caps
+  total Workers AI calls at `MAX_AI_CALLS_PER_WORKSPACE` (500), so a stuck
+  client or a chat loop can't run up an unbounded inference bill against
+  one workspace — once hit, chat says so plainly instead of pretending to
+  keep working.
 - **R10 (partial, confirmed and fixed):** `CREATE TABLE IF NOT EXISTS`
   only runs once, on a Durable Object's first ever request — a workspace
   already provisioned before a column was added would keep the old schema
@@ -217,27 +231,36 @@ each.
   gone, only the 20-review retention cap eventually rolling it off. AI
   call budgets beyond the per-call timeout (a running total, a
   concurrency cap) are still not built.
-- **R12, R13:** UI evidence-panel polish (sorting by priority, an
-  expandable evidence panel, accessibility), and a real `bench/` harness
-  with Workers-runtime integration tests, are still open. On bench
-  specifically: this project ships 3 sample plans, and a "benchmark"
-  script over the same 3 plans the CLI and CI already exercise wouldn't
-  measure anything the existing test suite doesn't already cover — it
-  would just be a number for its own sake. A real version needs a larger,
-  genuinely held-out plan corpus, which wasn't built in this pass; see
-  "Not built in this pass" above.
+- **R12 (mostly fixed):** the report used to render resources in plan
+  order, so the one high-severity finding in a large plan could be well
+  below the fold. `ui/app.js` now sorts resources by worst finding first
+  (high, then notable, then none), stable otherwise. Also added: `aria-live`
+  regions on status text, the report, the chat log, and the policy preview
+  so a screen reader announces updates instead of silence; labels on every
+  form input; `aria-pressed` on review-selector buttons; and a visible
+  `:focus-visible` outline for keyboard navigation. An expandable
+  per-resource evidence panel (currently everything is always shown, which
+  is more honest than hiding it behind a click but gets long on a big
+  plan) is still open.
+- **R13:** a real `bench/` harness with a larger held-out plan corpus and
+  Workers-runtime integration tests is still open. This project ships 3
+  sample plans, and a "benchmark" script over the same 3 plans the CLI and
+  CI already exercise wouldn't measure anything the existing test suite
+  doesn't already cover — it would just be a number for its own sake, so
+  it wasn't built rather than faked.
 
 This section exists because publishing "everything works" after finding 15
-real issues and fixing only some of them would be dishonest. R1, R2, R3, R4
-(partial), R5 (partial), R6, R7, R8 (partial), R9, R10 (partial), R11
-(partial), and R15
-(partial) are fixed, most with a regression test — a couple couldn't get
-one without a Durable Object test runtime this project doesn't have yet
-(noted inline above). They were chosen because they either directly
-undermined this project's own thesis (the S3 rule gap, the chat-grounding
-regex bugs, the policy false positives) or were an outright functional or
-security gap (the UI loop, the workspace race, a policy confirmable without
-ever being previewed, two crashes on malformed input). The rest is real
+real issues and fixing only some of them would be dishonest. R1, R2, R3,
+R4 (partial), R5 (partial), R6, R7, R8 (mostly), R9, R10 (partial), R11
+(partial), R12 (mostly), and R15 (partial) are fixed, most with a
+regression test — a couple couldn't get one without a Durable Object test
+runtime this project doesn't have yet (noted inline above). They were
+chosen because they either directly undermined this project's own thesis
+(the S3 rule gap, the chat-grounding regex bugs, the policy false
+positives) or were an outright functional or security gap (the UI loop,
+the workspace race, a policy confirmable without ever being previewed,
+two crashes on malformed input, an unenforced-in-code Origin check, an
+unbounded AI-call budget). The rest is real
 work, not an excuse.
 
 ## Input limits (may reject a legitimate large plan)
