@@ -1,0 +1,40 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "null_resource.tainted_trigger",
+      "mode": "managed",
+      "type": "null_resource",
+      "name": "tainted_trigger",
+      "provider_name": "registry.terraform.io/hashicorp/null",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": {"id": "old-id"},
+        "after": {"id": null},
+        "after_unknown": {"id": true}
+      }
+    },
+    {
+      "address": "aws_instance.worker",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "worker",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["update"],
+        "before": {"ami": "ami-old"},
+        "after": {"ami": "ami-new"},
+        "after_unknown": {"private_ip": true}
+      }
+    }
+  ],
+  "configuration": {
+    "root_module": {
+      "resources": [
+        { "address": "null_resource.tainted_trigger", "type": "null_resource", "expressions": {} },
+        { "address": "aws_instance.worker", "type": "aws_instance", "expressions": {} }
+      ]
+    }
+  }
+}

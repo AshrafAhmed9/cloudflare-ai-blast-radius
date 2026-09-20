@@ -1,0 +1,35 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "resource_changes": [
+    {
+      "address": "aws_db_instance.main",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "main",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": {"engine": "postgres", "instance_class": "db.t3.medium"},
+        "after": {"engine": "postgres", "instance_class": "db.r6g.large"},
+        "replace_paths": [["instance_class"]]
+      }
+    },
+    {
+      "address": "aws_security_group_rule.db_ingress",
+      "mode": "managed",
+      "type": "aws_security_group_rule",
+      "name": "db_ingress",
+      "provider_name": "registry.terraform.io/hashicorp/aws",
+      "change": { "actions": ["update"], "before": {}, "after": {} }
+    }
+  ],
+  "configuration": {
+    "root_module": {
+      "resources": [
+        { "address": "aws_db_instance.main", "type": "aws_db_instance", "expressions": { "instance_class": { "constant_value": "db.r6g.large" } } },
+        { "address": "aws_security_group_rule.db_ingress", "type": "aws_security_group_rule", "expressions": { "security_group_id": { "references": ["aws_db_instance.main.vpc_security_group_ids"] } } }
+      ]
+    }
+  }
+}
