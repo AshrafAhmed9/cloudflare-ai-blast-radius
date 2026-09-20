@@ -31,10 +31,25 @@ function connectWebSocket() {
   ws.addEventListener("open", () => {
     wsReady = true;
     el.status.textContent = "connected";
+    if (activeReviewId) {
+      el.chatInput.disabled = false;
+      el.chatSend.disabled = false;
+    }
+    // R3 (adversarial review): a reconnect used to only flip the status
+    // text. Any assistant reply that arrived while the socket was down
+    // (e.g. the fire-and-forget opening summary) was never fetched, so the
+    // chat looked stuck. Re-pull the canonical message list for whatever
+    // review is active so a reconnect can't silently drop messages.
+    rehydrateActiveReview();
   });
   ws.addEventListener("close", () => {
     wsReady = false;
     el.status.textContent = "disconnected — retrying…";
+    // R3: chat looked usable while disconnected — the form's submit
+    // handler silently swallowed the click. Disable it explicitly so the
+    // UI matches reality; re-enabled on reconnect above.
+    el.chatInput.disabled = true;
+    el.chatSend.disabled = true;
     setTimeout(connectWebSocket, 2000);
   });
   ws.addEventListener("error", () => {
@@ -200,6 +215,35 @@ async function hydrateWorkspace() {
   if (state?.activeReviewId) await selectReview(state.activeReviewId);
 }
 
+/** Re-pulls the canonical message list for the active review from the
+ *  server (R3) — called on every WebSocket (re)connect. Always replaces
+ *  the cache and re-renders from the server's own ordering rather than
+ *  appending, so a message received twice (once buffered server-side,
+ *  once from a stale local copy) can never show up twice. A no-op when
+ *  there's no active review yet. */
+async function rehydrateActiveReview() {
+  if (!activeReviewId) return;
+  const reviewId = activeReviewId;
+  const token = ++selectionToken;
+  try {
+    const res = await fetch(`${AGENT_HTTP_BASE}/review/${encodeURIComponent(reviewId)}`);
+    if (!res.ok || token !== selectionToken || reviewId !== activeReviewId) return;
+    const data = await res.json();
+    const cache = { result: data.result, messages: data.messages ?? [], policyFindings: data.policyFindings ?? [] };
+    reviewCache.set(reviewId, cache);
+    el.chatLog.innerHTML = "";
+    el.chatEmpty.hidden = cache.messages.length > 0;
+    if (cache.messages.length === 0) el.chatLog.appendChild(el.chatEmpty);
+    for (const m of cache.messages) appendChatBubble(m);
+  } catch {
+    // Reconnect will retry on its own timer; nothing to surface here.
+  } finally {
+    if (ws && wsReady && reviewId === activeReviewId) {
+      ws.send(JSON.stringify({ type: "set_active", reviewId }));
+    }
+  }
+}
+
 async function submitPlan(planText, label) {
   let plan;
   try {
@@ -329,7 +373,12 @@ el.chatForm.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = el.chatInput.value.trim();
   if (!text || !activeReviewId || !ws || !wsReady) return;
-  appendChatBubble({ role: "user", content: text });
+  // R3 (adversarial review): this used to append the user's bubble
+  // optimistically AND render it again when the server broadcast the
+  // persisted message back — every question the user asked showed up
+  // twice. The server is the source of truth for message ordering and
+  // ids; `handleServerMessage` renders the bubble once that broadcast
+  // arrives, which for a live connection is near-instant.
   ws.send(JSON.stringify({ type: "chat", reviewId: activeReviewId, text }));
   el.chatInput.value = "";
 });

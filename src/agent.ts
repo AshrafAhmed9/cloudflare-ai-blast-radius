@@ -20,6 +20,23 @@ const MAX_RETAINED_REVIEWS = 20;
 const MAX_CHAT_MESSAGE_CHARS = 2000;
 const MAX_RETAINED_POLICIES = 30;
 const PROPOSAL_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const AI_CALL_TIMEOUT_MS = 20_000; // R9: bound every model call, never wait forever
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("ai-call-timeout")), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
 
 export interface ReviewSummary {
   id: string;
@@ -42,6 +59,7 @@ interface ReviewRow {
   result_json: string;
   policy_findings_json: string;
   policy_revision_json: string;
+  summary_status: "pending" | "completed" | "failed";
 }
 
 interface PolicyRow {
@@ -90,6 +108,30 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       policy_findings_json TEXT NOT NULL DEFAULT '[]',
       policy_revision_json TEXT NOT NULL DEFAULT '[]'
     )`;
+    // R10 (adversarial review): `CREATE TABLE IF NOT EXISTS` only creates
+    // the table on its very first run — a workspace whose Durable Object
+    // was already provisioned before a column was added (this happened
+    // twice already: policy_findings_json/policy_revision_json, and now
+    // summary_status) would keep the old schema forever and every query
+    // touching the missing column would throw. `ALTER TABLE ADD COLUMN`
+    // is the idempotent-migration primitive SQLite actually gives us;
+    // it errors on a column that already exists, so each one is applied
+    // inside its own try/catch and treated as "already migrated."
+    try {
+      this.sql`ALTER TABLE reviews ADD COLUMN policy_findings_json TEXT NOT NULL DEFAULT '[]'`;
+    } catch {
+      // Column already exists — already migrated, nothing to do.
+    }
+    try {
+      this.sql`ALTER TABLE reviews ADD COLUMN policy_revision_json TEXT NOT NULL DEFAULT '[]'`;
+    } catch {
+      // Column already exists — already migrated, nothing to do.
+    }
+    try {
+      this.sql`ALTER TABLE reviews ADD COLUMN summary_status TEXT NOT NULL DEFAULT 'pending'`;
+    } catch {
+      // Column already exists — already migrated, nothing to do.
+    }
     this.sql`CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
       review_id TEXT NOT NULL,
@@ -269,8 +311,20 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
   }
 
   private async enrichWithSummary(reviewId: string, result: AnalysisResult) {
-    const answer = await summarizeReview(this.env.AI, result);
-    this.appendMessage(reviewId, "assistant", answer.note ? `${answer.text}\n\n${answer.note}` : answer.text);
+    // R9 (adversarial review): this was fire-and-forget with a swallowed
+    // `.catch(() => {})` at the call site — a failed summary left no trace
+    // anywhere, so a client polling the review had no way to distinguish
+    // "still working on it" from "broke and gave up." summary_status makes
+    // that honest, and the call itself is now bounded instead of able to
+    // hang indefinitely on a stalled model request.
+    try {
+      const answer = await withTimeout(summarizeReview(this.env.AI, result), AI_CALL_TIMEOUT_MS);
+      this.appendMessage(reviewId, "assistant", answer.note ? `${answer.text}\n\n${answer.note}` : answer.text);
+      this.sql`UPDATE reviews SET summary_status = 'completed' WHERE id = ${reviewId}`;
+    } catch {
+      this.sql`UPDATE reviews SET summary_status = 'failed' WHERE id = ${reviewId}`;
+      throw new Error("summary generation failed or timed out");
+    }
   }
 
   private appendMessage(reviewId: string, role: "user" | "assistant", content: string) {
@@ -290,6 +344,7 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       policyFindings: JSON.parse(row.policy_findings_json),
       policyRevision: JSON.parse(row.policy_revision_json),
       messages,
+      summaryStatus: row.summary_status,
     });
   }
 
@@ -408,6 +463,22 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     return Response.json({ deleted: policyId });
   }
 
+  /** DELETE /workspace — wipes every review, message, policy, and pending
+   *  policy proposal in this workspace's Durable Object. R10: this
+   *  project's retention story was previously "reviews expire off the end
+   *  of a 20-row cap eventually," with no way for someone to actually ask
+   *  for their data gone. The cookie itself isn't cleared here (that's the
+   *  browser's business — clearing it just means the next visit gets a
+   *  fresh, empty workspace), but every row this workspace owns is. */
+  private handleDeleteWorkspace(): Response {
+    this.sql`DELETE FROM reviews`;
+    this.sql`DELETE FROM messages`;
+    this.sql`DELETE FROM policies`;
+    this.sql`DELETE FROM policy_proposals`;
+    this.setState({ reviews: [], activeReviewId: null });
+    return Response.json({ deleted: true });
+  }
+
   override async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
     // Path after the agent/instance prefix, e.g. "/review" or "/review/<id>".
@@ -436,6 +507,9 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
     if (request.method === "DELETE" && tail[0] === "policies" && tail[1]) {
       return this.handleDeletePolicy(tail[1]);
     }
+    if (request.method === "DELETE" && tail[0] === "workspace") {
+      return this.handleDeleteWorkspace();
+    }
     return Response.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -460,13 +534,35 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
         connection.send(JSON.stringify({ type: "error", error: "Unknown review id for this workspace." }));
         return;
       }
-      this.appendMessage(parsed.reviewId, "user", text);
-
+      // R9 (adversarial review): history used to be read AFTER inserting
+      // the current question, so the just-inserted row came back in the
+      // SELECT and then the same question was appended a second time
+      // below — every question was sent to the model twice, wasting
+      // tokens and risking a confused answer. Read history first, insert
+      // the question second.
       const history = this.sql<MessageRow>`SELECT * FROM messages WHERE review_id = ${parsed.reviewId} ORDER BY created_at ASC`
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content }) as const);
+      this.appendMessage(parsed.reviewId, "user", text);
 
-      const answer = await askAboutReview(this.env.AI, result, text, { history });
+      let answer: Awaited<ReturnType<typeof askAboutReview>>;
+      try {
+        answer = await withTimeout(askAboutReview(this.env.AI, result, text, { history }), AI_CALL_TIMEOUT_MS);
+      } catch (err) {
+        // R9: an AI failure (including our own timeout) used to leave the
+        // chat hanging with no assistant turn at all — the user had no
+        // way to tell "still thinking" from "broke." Always leave a
+        // message in the transcript, honest about which happened.
+        const timedOut = err instanceof Error && err.message === "ai-call-timeout";
+        this.appendMessage(
+          parsed.reviewId,
+          "assistant",
+          timedOut
+            ? `AI explanation timed out after ${AI_CALL_TIMEOUT_MS / 1000}s. The deterministic findings above are unaffected.`
+            : "AI explanation unavailable right now (model request failed). The deterministic findings above are unaffected.",
+        );
+        return;
+      }
       this.appendMessage(parsed.reviewId, "assistant", answer.note ? `${answer.text}\n\n${answer.note}` : answer.text);
       return;
     }

@@ -178,18 +178,59 @@ each.
   above). The rest of R8 — origin checks, size/depth limits on every
   request and WS frame, rejecting generic client-state writes — is still
   open.
-- **R3, R9, R10, R12, R13:** UI truthfulness details (stale cache on
-  reconnect, optimistic-append double-counting, unchecked delete
-  responses), AI-call cost/status persistence, a SQLite migration path for
-  already-deployed workspaces with the pre-policy schema, UI evidence-panel
-  polish, and a real `bench/` harness with Workers-runtime integration
-  tests. Each is a real, legitimate gap the review correctly identified;
-  none were reproduced with a failing test or fixed in this pass given
-  remaining time.
+- **R3 (confirmed and fixed):** the chat client optimistically rendered the
+  user's own message locally, then rendered it again when the server
+  broadcast the persisted copy back — every question appeared twice.
+  Reconnect also only updated the status text; any assistant reply that
+  landed while the socket was down (the fire-and-forget opening summary,
+  most often) was never fetched, so the chat looked stuck. Fixed in
+  `ui/app.js`: the optimistic append is gone (the server's broadcast is now
+  the only render path for a sent message), and `rehydrateActiveReview()`
+  re-pulls the canonical message list from `GET /review/:id` on every
+  connect, replacing rather than appending so a reconnect can't
+  double-render either. Chat input is now also disabled while
+  disconnected instead of silently swallowing a submit.
+- **R9 (confirmed and fixed):** the current chat question was included in
+  its own history twice, once via the SQL read (which ran *after* the
+  question was already inserted) and once as the explicit final message,
+  doubling every request's token cost and risking a confused answer. Fixed
+  by reading history before inserting the question. Also: every Workers AI
+  call (the opening summary and every chat turn) previously had no timeout
+  and could hang indefinitely on a stalled request, and a failed summary
+  was silently swallowed with `.catch(() => {})` with no trace anywhere.
+  Both calls are now bounded to 20s (`withTimeout` in `src/agent.ts`), a
+  timed-out or failed chat turn now always leaves an honest assistant
+  message in the transcript instead of leaving the user staring at
+  nothing, and a `summary_status` column (`pending`/`completed`/`failed`,
+  returned from `GET /review/:id`) makes the opening-summary outcome
+  inspectable instead of invisible.
+- **R10 (partial, confirmed and fixed):** `CREATE TABLE IF NOT EXISTS`
+  only runs once, on a Durable Object's first ever request — a workspace
+  already provisioned before a column was added would keep the old schema
+  forever (this had already silently happened once, for
+  `policy_findings_json`/`policy_revision_json`). Fixed with idempotent
+  `ALTER TABLE ADD COLUMN` migrations wrapped in try/catch (SQLite has no
+  `ADD COLUMN IF NOT EXISTS`, so "column already exists" is how you detect
+  "already migrated"). Also added `DELETE /workspace`, which wipes every
+  review, message, policy, and pending policy proposal for that
+  workspace — there was previously no way to actually ask for your data
+  gone, only the 20-review retention cap eventually rolling it off. AI
+  call budgets beyond the per-call timeout (a running total, a
+  concurrency cap) are still not built.
+- **R12, R13:** UI evidence-panel polish (sorting by priority, an
+  expandable evidence panel, accessibility), and a real `bench/` harness
+  with Workers-runtime integration tests, are still open. On bench
+  specifically: this project ships 3 sample plans, and a "benchmark"
+  script over the same 3 plans the CLI and CI already exercise wouldn't
+  measure anything the existing test suite doesn't already cover — it
+  would just be a number for its own sake. A real version needs a larger,
+  genuinely held-out plan corpus, which wasn't built in this pass; see
+  "Not built in this pass" above.
 
 This section exists because publishing "everything works" after finding 15
-real issues and fixing only some of them would be dishonest. R1, R2, R4
-(partial), R5 (partial), R6, R7, R8 (partial), R11 (partial), and R15
+real issues and fixing only some of them would be dishonest. R1, R2, R3, R4
+(partial), R5 (partial), R6, R7, R8 (partial), R9, R10 (partial), R11
+(partial), and R15
 (partial) are fixed, most with a regression test — a couple couldn't get
 one without a Durable Object test runtime this project doesn't have yet
 (noted inline above). They were chosen because they either directly

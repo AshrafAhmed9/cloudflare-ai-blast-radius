@@ -193,17 +193,23 @@ real bugs (a packaging issue in the `agents` dependency, and the Workers AI
 response-shape surprise above) were found and fixed by actually deploying,
 not by assuming it would work.
 
-An adversarial review pass found 15 issues. Eight are fixed, most with a
+An adversarial review pass found 15 issues. Eleven are fixed, most with a
 regression test: an infinite-request loop in the browser client, a
 workspace-identity race on first visit, an S3 rule that missed
 replacements, a policy-confirmation endpoint that trusted a
 client-computable hash instead of a server-issued token, two crashes on
-malformed input, two resource-address bugs in the chat verifier, and a
-policy-predicate matcher that used substring matching and produced false
-positives. The rest is real gaps, tracked and not hidden, in
-`docs/limitations.md`: input-validation hardening, AI call budgets, a
-schema migration path for already-deployed workspaces, a real benchmark
-harness, a delete-workspace endpoint.
+malformed input, two resource-address bugs in the chat verifier, a
+policy-predicate matcher that produced false positives on substring
+matches, a chat client that double-rendered every message and lost replies
+on reconnect, a chat call that sent the current question to the model
+twice, and a schema that silently stayed stale for any workspace
+provisioned before a column was added. Also added: bounded (20s) AI calls
+instead of an unbounded hang, an honest per-review `summary_status` instead
+of a silently swallowed failure, and a `DELETE /workspace` endpoint. The
+rest is real gaps, tracked and not hidden, in `docs/limitations.md`: origin
+checks and request-size limits, a running AI-call budget beyond the
+per-call timeout, and a real benchmark harness (deliberately not padded
+with a 3-plan script that wouldn't measure anything new).
 
 ## Layout
 
