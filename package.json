@@ -9,8 +9,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cli": "tsx src/cli.ts",
-    "bench": "tsx bench/run.ts"
+    "cli": "tsx src/cli.ts"
   },
   "dependencies": {
     "agents": "0.24.0",

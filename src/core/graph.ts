@@ -79,7 +79,13 @@ export function buildGraph(configuration: unknown, facts: readonly ResourceChang
   const unresolvedReferences: UnresolvedReference[] = [];
 
   const config = configuration as ConfigurationBlock | undefined;
-  const resources = config?.root_module?.resources ?? [];
+  // `resources` should be an array per Terraform's own JSON format spec, but
+  // a malformed or hand-edited plan could hand us anything at this boundary
+  // — never trust an external document's shape past what we've already
+  // validated. Anything not actually an array degrades to "no resources",
+  // not a crash.
+  const rawResources = config?.root_module?.resources;
+  const resources = Array.isArray(rawResources) ? rawResources : [];
 
   // address -> fact.id, restricted to single-instance resources so we never
   // join a count/for_each instance to a config-level address by prefix.

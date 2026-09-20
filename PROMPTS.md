@@ -25,12 +25,29 @@ include tool outputs, system reminders, or the assistant's own responses —
 only what a person actually typed. Run it yourself: `python3
 scripts/export-prompts.py <transcript.jsonl> <output.md> <title>`.
 
+One exception: the raw export includes full skill files (like `competition`)
+that Claude Code auto-loads into a turn whenever a skill is invoked — these
+are tool-injected content, not something typed, so the exporter can't tell
+them apart from a real prompt automatically. In `prompts/session-01-*.md`,
+one such block was manually replaced with a short note describing what it
+contained and why it's summarized instead of reproduced in full; that edit
+is disclosed in that file itself.
+
 ## Redaction
 
 The initial prompt is the full pasted job posting and application form,
-which contained Ashraf's personal phone number and two email addresses.
-Partway through the session, Ashraf also pasted a live Cloudflare API token
-directly into chat so this work could deploy and verify against the real
+which contained Ashraf's personal phone number, two email addresses, and
+answers to Cloudflare's voluntary self-identification survey (gender,
+ethnicity) — Cloudflare's own form states that survey data "will be
+recorded and maintained in a confidential file," so it's redacted here too,
+manually, since the exporter's automated rules target contact info and
+secrets specifically. A short run of personal commentary about the
+motivation for the application was also manually trimmed from prompt 1 —
+replaced with a `[REDACTED: ...]` marker describing what was removed,
+same convention as everything else here — since it isn't relevant to the
+engineering work and doesn't need to be public. Partway through the
+session, Ashraf also pasted a live Cloudflare API token directly into chat
+so this work could deploy and verify against the real
 API. All of these are redacted with an explicit `[REDACTED: <label>]` marker
 by regex in the exporter — see `REDACTIONS` in `scripts/export-prompts.py`.
 
@@ -52,17 +69,20 @@ reason to rotate the credential, not a reason to worry about this repo.
 
 ## What the model got wrong, and the correction
 
-- **First plan draft overclaimed.** An earlier draft of `PLAN.md` (written
-  before this repository existed) asserted things like "0% false negatives"
-  and ranked this idea against six other GitHub repositories as if that were
-  a verified competitive study. Prompt 7 ("tell me what is left have you
-  completed the entire submission") and a general "how confident are you"
-  push (see the conversation around prompt 8) forced an honest self-review:
-  the plan was rewritten to remove outage guarantees, replace the
-  unverified competitor ranking with a plainly-labeled informal check,
-  separate deterministic facts from AI-generated advisory text, and add
-  explicit acceptance gates instead of adjectives like "good enough to win."
-  The version in this repository's `PLAN.md` is the corrected one.
+- **The first planning draft overclaimed.** It asserted things like "0%
+  false negatives" and ranked this idea against six other GitHub
+  repositories as if that were a verified competitive study. Prompt 7
+  ("tell me what is left have you completed the entire submission") and a
+  general "how confident are you" push (see the conversation around prompt
+  8) forced an honest self-review: the plan was rewritten to drop outage
+  guarantees, replace the unverified competitor ranking with a
+  plainly-labeled informal check, separate deterministic facts from
+  AI-generated advisory text, and add concrete acceptance gates instead of
+  adjectives like "good enough to win." The internal planning document
+  itself isn't part of this repository — it was a working scratchpad, not
+  something meant for a reviewer to read — but the corrected engineering
+  standard it settled on (state facts, don't claim guarantees, show the
+  gaps) is what actually shaped the code and the README.
 - **Assumed a Cloudflare deadline that didn't exist.** An early draft
   scheduled the build around a fixed 7-day window. Ashraf's actual
   constraint, surfaced during planning, was "as long as you need" — the plan

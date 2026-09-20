@@ -1,13 +1,11 @@
 # Blast Radius
 
-Reads `terraform show -json` output and reports what each planned change
-actually does, with the exact evidence for each claim — not a guess, and
-never "safe to apply."
+A `terraform plan` reviewer. It reads `terraform show -json` output and tells
+you, per resource, what's actually going to happen, with the exact field
+that forced it, instead of a wall of "3 to add, 5 to change, 1 to destroy"
+that everyone skims past.
 
-**Deployed URL:** https://cf-ai-blast-radius.ashrafahmed1232.workers.dev —
-live, verified end-to-end (deterministic analysis, live Workers AI chat, and
-the policy compiler all tested against the real running app — see
-[Status](#status)).
+**Live:** https://cf-ai-blast-radius.ashrafahmed1232.workers.dev
 
 ```
 $ npm run cli -- ui/samples/replace-db.json
@@ -19,82 +17,81 @@ aws_db_instance.main  [replace-delete-first]  coverage=complete
 1 finding(s), 1 high severity.
 ```
 
-## What this is, and isn't
+## Why
 
-Terraform's plan output is a wall of JSON. Engineers approving a change skim
-it; the line that deletes a database looks the same as the line that renames
-a tag. This tool separates four things Terraform's plan JSON actually
-contains — planned action, rule-based findings, evidence coverage, and
-resource references — and shows them per-resource, with the exact field that
-triggered each finding.
+`terraform plan` treats a database replacement and a tag rename as the same
+kind of line. An engineer approving a PR skims the summary count, sees
+nothing alarming, and applies it. The database is what's gone.
 
-It does **not** run Terraform, apply anything, or claim a plan is safe. A
-plan does not establish live traffic, redundancy, backup recoverability, or
-runtime health — see [Limitations](#limitations).
+This tool pulls apart what a Terraform plan actually contains: action,
+rule-based finding, evidence coverage, and resource references, and shows
+all four per resource, citing the exact JSON field behind each claim. It
+doesn't run Terraform or apply anything, and it never says "safe." A plan
+can't establish live traffic, backup recoverability, or runtime health, and
+claiming otherwise would be worse than saying nothing. See
+[Limitations](#limitations).
 
-Cloudflare has [publicly written about](https://blog.cloudflare.com/terraforming-cloudflare-at-cloudflare/)
-managing their own infrastructure with Terraform, Atlantis, and ~50 OPA/Rego
-policies. This tool complements that kind of workflow — it doesn't replace a
-production policy engine, and OPA already does plan-level policy evaluation.
-What this adds is an evidence-linked explanation and conversational review on
-top of the same plan JSON.
+Cloudflare has [written publicly](https://blog.cloudflare.com/terraforming-cloudflare-at-cloudflare/)
+about running Terraform against Atlantis with around 50 OPA/Rego policies
+gating every merge. This sits next to that, not instead of it. OPA answers
+"is this configuration allowed," this answers "what does this specific plan
+actually do, and what's the evidence."
 
-## The distinctive part: teach it a policy in English
+## Teaching it a policy in plain English
 
-Beyond reviewing a plan against the built-in rule pack, you can type a
-sentence like *"Flag deletion or replacement of database instances"* into
-the Policies panel. It's compiled into a small typed rule (never generated
-code — see `src/policies/types.ts`), previewed against the currently
-selected plan so you see exactly which resources it would flag before it's
-saved, and only persisted after you confirm. From then on, every review
-submitted in that workspace is checked against it too, citing your own
-sentence in the finding. A review's policy findings are snapshotted at
-creation time — adding a policy later doesn't retroactively change an
-earlier review's findings. See `docs/decisions.md` for the full lifecycle
-(propose → dry-run → hash-bound confirm → persist) and why that matters.
+Type a sentence like *"Flag deletion or replacement of database instances"*
+into the Policies panel. It gets compiled into a small typed rule (never
+generated code, the schema is in `src/policies/types.ts`), previewed
+against your currently selected plan so you can see exactly which resources
+it would flag, and only saved once you confirm it. After that, every review
+in that workspace gets checked against it, citing your sentence in the
+finding.
 
-## Requirements mapping
+A review's policy findings are snapshotted the moment it's created. Add a
+policy later and older reviews don't silently change. See
+`docs/decisions.md` for the full propose → preview → confirm → persist
+lifecycle and why it works that way.
 
-| Requirement | Implementation | Where |
+## What satisfies the assignment's requirements
+
+| Requirement | How | Where |
 | --- | --- | --- |
 | LLM | Workers AI, `@cf/meta/llama-3.3-70b-instruct-fp8-fast` | [`src/ai/chat.ts`](src/ai/chat.ts) |
-| Workflow / coordination | Cloudflare Agents SDK on Durable Objects — a persisted review state machine with idempotent submission and reconnect-safe state | [`src/agent.ts`](src/agent.ts) |
+| Workflow / coordination | Agents SDK on Durable Objects: one persisted review state machine per workspace, idempotent submission, reconnect-safe | [`src/agent.ts`](src/agent.ts) |
 | Chat or voice | Browser chat over WebSocket, grounded in the selected review | [`ui/app.js`](ui/app.js), [`src/agent.ts`](src/agent.ts) |
-| Memory or state | Agent SQLite: reviews and conversation persist per workspace, survive reload | [`src/agent.ts`](src/agent.ts) |
-| AI prompt history | Root `PROMPTS.md`, exported from the real session transcript | [`PROMPTS.md`](PROMPTS.md) |
+| Memory or state | Agent SQLite: reviews and conversation survive reload | [`src/agent.ts`](src/agent.ts) |
+| AI prompt history | [`PROMPTS.md`](PROMPTS.md), exported straight from the session transcript | [`PROMPTS.md`](PROMPTS.md), [`prompts/`](prompts/) |
 
-See [`docs/decisions.md`](docs/decisions.md) for why Workflows (plural, the
-product) weren't added on top of the Agent/Durable Object coordination, and
-why D1 wasn't added — both are real tradeoffs, not omissions.
+`docs/decisions.md` covers why Workflows-the-product weren't stacked on top
+of the Agent/Durable Object coordination, and why D1 isn't in here. Neither
+would be pulling its weight yet.
 
-## Quick start (offline — no credentials needed)
+## Running it
+
+Offline, no credentials:
 
 ```bash
-nvm install 22 && nvm use 22   # wrangler 4.x requires Node >= 22
-npm install --legacy-peer-deps # see docs/decisions.md for the one dependency conflict this bypasses
+nvm install 22 && nvm use 22   # wrangler 4.x needs Node >= 22
+npm install --legacy-peer-deps # see docs/decisions.md for the one dependency conflict this works around
 npm run typecheck
-npm test                       # 77 tests, all offline, no network
+npm test                       # 78 tests, no network
 npm run cli -- ui/samples/replace-db.json
 npm run cli -- ui/samples/ordinary-update.json
 npm run cli -- ui/samples/incomplete-evidence.json
 ```
 
-CLI exit codes: `0` = no high-severity finding under supported checks, `1` =
-at least one high-severity finding, `2` = invalid/unsupported input. Exit `0`
-is not a safety guarantee — it means the checks this tool runs found nothing.
-
-Example CI usage — the exit code alone is the gate; most CI systems fail the
-step automatically on a non-zero exit, so no extra shell logic is needed:
+CLI exit codes: `0` no high-severity finding, `1` at least one, `2` bad
+input. Zero isn't a safety guarantee, just "the checks this tool runs found
+nothing." In CI the exit code is the whole gate:
 
 ```bash
 npm run cli -- plan.json
 ```
 
-If you want a custom message on top of that (rather than just failing the
-step), capture and re-propagate the exit code explicitly — do **not** chain
-it with `||`/`&&` on one line, which silently swallows the real exit code
-(a mistake an earlier draft of this README made — the compound line reported
-success even when a high-severity finding was present):
+If you want your own message on top instead of just failing the step,
+capture the exit code explicitly. Don't chain it with `||`/`&&` on one
+line, which quietly reports success no matter what happened (an earlier
+draft of this README shipped that exact bug):
 
 ```bash
 npm run cli -- plan.json
@@ -103,152 +100,127 @@ if [ "$code" -eq 1 ]; then echo "review required"; fi
 exit "$code"
 ```
 
-## Running the full app locally (needs Cloudflare credentials)
+Full app, locally (needs Cloudflare credentials: Workers AI has no local
+emulation, so `npm run dev` calls the real API):
 
 ```bash
-wrangler login          # or: export CLOUDFLARE_API_TOKEN=...
-npm run dev              # wrangler dev — proxies Workers AI to the real API, so this is not free
+wrangler login          # or export CLOUDFLARE_API_TOKEN=...
+npm run dev
 npm run deploy
 ```
 
-Workers AI has no local emulation; every `env.AI.run()` call in `npm run dev`
-hits the real API. The deployed app above is already live and doesn't
-require this — this is only for local development.
+The deployed URL above already runs this. You only need this if you're
+changing the code.
 
-## Architecture
+## How it fits together
 
 ```
-Browser (ui/, vanilla JS + WebSocket)
+Browser (ui/, plain JS + WebSocket)
   │ POST /agents/review-agent/workspace/review   { plan, idempotencyKey }
   │ WS   /agents/review-agent/workspace          { type: "chat", reviewId, text }
   ▼
 worker.ts — derives workspace identity from an HttpOnly cookie server-side,
             routes to that workspace's Durable Object, serves static assets
   ▼
-agent.ts — ReviewAgent (Agents SDK, one instance per workspace)
+agent.ts — ReviewAgent (one Durable Object instance per workspace)
   1. validate + limit (1 MiB, 200 resources, 20 retained reviews)
-  2. core/analyze.ts — parse → sanitize → rules → graph   (deterministic, no AI)
-  3. persist to SQLite, respond immediately with the complete result
-  4. fire-and-forget: ai/chat.ts summarizes via Workers AI, appended to chat
-  5. chat over WebSocket: every answer grounded in the stored review,
+  2. core/analyze.ts — parse → rules → graph, all deterministic, no AI
+  3. persist to SQLite, respond with the complete result immediately
+  4. fire-and-forget: ai/chat.ts appends a Workers AI summary to the chat
+  5. chat over WebSocket, every answer grounded in the stored review and
      checked by ai/verify.ts against the plan's real resource ids
 ```
 
-`src/core/` has zero network dependency — it's the same code the CLI runs.
-The model never sees raw plan values — `ResourceChangeFact` never carries a
-resource's raw before/after values to begin with, only addresses, types,
-actions, and evidence *paths* (see `src/core/sanitize.ts`) — and the model
-can never change a finding — see `docs/decisions.md`.
+`src/core/` has no network dependency at all. It's the exact code the CLI
+runs. The model never sees a raw plan value: `ResourceChangeFact` only ever
+carries addresses, types, actions, and evidence *paths*, never the values at
+those paths (`src/core/sanitize.ts`), and there's no code path that lets a
+model's output write back into a finding.
 
-## Results
+## What's actually verified, and how
 
-Offline, deterministic, reproduced by `npm test`:
+Offline, reproduced by `npm test`:
 
-- **77 unit tests, 0 failures** — parser (10), analyze orchestrator (7),
-  reference graph (6), rule pack (12), fact isolation (1), AI context/verify
-  (9), policy interpreter's three-valued logic including exact-segment path
-  matching (14), policy compiler including two real bugs it caught (9),
-  proposal-hash binding (4), a worker-level bootstrap/cookie test against the
-  real exported handler (4), and a browser-client regression test that loads
-  the actual `ui/app.js` against stubbed fetch/DOM to prove a real
-  infinite-request-loop bug (found by adversarial review) stays fixed (1).
-- All three sample plans (`ui/samples/*.json`) produce the exact output shown
-  at the top of this README and in [`docs/limitations.md`](docs/limitations.md).
+- **78 tests, 0 failures** across the parser, the deterministic analyzer, the
+  reference graph, the six-entry rule pack, the policy interpreter's
+  three-valued logic, the policy compiler (including two real bugs it
+  caught before this ever ran live), proposal hashing, a worker-level test
+  against the real exported HTTP handler, and a browser-client test that
+  loads the actual `ui/app.js` against stubbed fetch/DOM to prove a real
+  infinite-request-loop bug stays fixed.
+- All three sample plans produce the exact output shown above and in
+  `docs/limitations.md`.
 
-Live, verified against the deployed app (not mocked):
+Against the live deployment, not mocked:
 
-- Submitted a real plan → correct deterministic findings, then a live Llama
-  3.3 summary appended a few seconds later, correctly citing the resource id
-  and the exact attribute that forced the replacement.
-- Asked the live chat "why is this being replaced?" over a real WebSocket
-  connection → grounded, correct answer citing `replace_paths: instance_class`.
-- Proposed a live policy ("Flag deletion or replacement of database
-  instances") → compiled, dry-run showed the correct match, confirmed, then
-  a **new** review submitted afterward showed the policy finding citing the
-  sentence, while the **original** review (submitted before the policy
-  existed) stayed unchanged at zero policy findings — the snapshot guarantee
-  from `docs/decisions.md` holds against the real infrastructure, not just
-  in mocked tests.
-- This surfaced and fixed a real bug: Workers AI returns `raw.response`
-  **pre-parsed as an object**, not a JSON string, when the completion is
-  valid JSON — undocumented behavior found via `wrangler tail`, not in the
-  docs. The policy compiler was silently getting an empty string and failing
-  every live request until this was fixed. See `docs/decisions.md`.
+- A real plan submitted returns correct deterministic findings immediately,
+  then a Llama 3.3 summary lands a few seconds later citing the actual
+  resource id and forcing attribute.
+- Asking the live chat "why is this being replaced?" over a real WebSocket
+  gets a grounded answer citing `replace_paths: instance_class`.
+- Proposing a policy, confirming it, then submitting a plan afterward
+  produces the policy finding citing your sentence, and a review submitted
+  *before* the policy existed stays unchanged. The snapshot guarantee holds
+  against real infrastructure, not just a mock.
+- This is also how a real bug got caught: Workers AI hands back
+  `raw.response` pre-parsed as an object, not the JSON string the
+  documented example implies, when the completion is valid JSON. Every live
+  policy-compile call silently failed on an empty string until this was
+  found with `wrangler tail` and fixed. Full writeup in `docs/decisions.md`.
 
-**Not yet measured:** a held-out accuracy benchmark against a larger
-real-plan corpus (`bench/` — see [Status](#status)); publishing a fabricated
-number here would be worse than publishing none.
+**Not measured:** accuracy against a larger real-plan corpus. There's no
+`bench/` harness yet, and a made-up number here would be worse than none.
 
 ## Limitations
 
-See [`docs/limitations.md`](docs/limitations.md) for the full list, including
-an itemized adversarial-review backlog (`docs/limitations.md#adversarial-review-findings`)
-covering what was fixed versus deliberately deferred. In short: the reference
-graph only resolves single-instance, root-module resources (count/for_each
-and nested modules are reported as unresolved, not guessed); the rule pack
-covers 6 resource types; replacement causes are only shown when Terraform's
-plan JSON itself provides them; the policy-confirm step is now bound to a
-server-issued opaque proposal id (R7 fixed) but that fix has no automated
-test yet, since it needs the real Durable Object runtime to exercise.
+Full list in [`docs/limitations.md`](docs/limitations.md), including a
+line-by-line disposition of everything an adversarial review pass found.
+The short version: the reference graph only resolves single-instance,
+root-module resources (`count`/`for_each` and nested modules come back as
+explicitly unresolved, never guessed); the rule pack covers 6 resource
+types; replacement causes only show up when Terraform's own plan JSON
+provides them; and a couple of fixes (binding policy confirmation to a
+server-issued proposal id, rejecting malformed request bodies) don't have
+automated coverage yet because exercising them needs a real Durable Object
+runtime this test suite doesn't have.
 
-## Status
+## Where this stands
 
-Honest, as of this commit:
+Built and deployed. The deterministic core, rule pack, reference graph,
+policy compiler, and chat are all confirmed against the live app, not just
+against mocks, see the section above. `wrangler deploy` runs clean; two
+real bugs (a packaging issue in the `agents` dependency, and the Workers AI
+response-shape surprise above) were found and fixed by actually deploying,
+not by assuming it would work.
 
-- **Built, deployed, and verified live:** deterministic core, rule pack,
-  reference graph, policy compiler, chat — all confirmed against the real
-  running app at the URL above, not just mocked tests. 77 passing offline
-  tests, clean typecheck, CI green. `wrangler deploy` succeeded; a real
-  packaging bug in the `agents@0.24.0` dependency and a real Workers AI
-  response-shape bug in the policy compiler were both found and fixed by
-  actually running this live, not assumed away — see `docs/decisions.md`
-  and the Results section above.
-- **Adversarial review found 15 issues; this pass fixed 8**, each with a
-  regression test where one didn't require a live Durable Object to
-  exercise: a genuine infinite-request loop in the browser client that
-  never settled once any review existed; a workspace-identity race where
-  the client fired its WebSocket and its first fetches independently,
-  letting a cookie-less first visit split across two Durable Object
-  instances (fixed with a single awaited `/api/bootstrap` step); an S3
-  bucket rule that only matched plain deletion, not replacement; a policy
-  confirmation endpoint that trusted a client-recomputable hash rather than
-  a server-issued proposal — a client could call `/policy/confirm` directly
-  with a self-computed hash, skipping the compile/dry-run step entirely
-  (fixed with a server-side `policy_proposals` table keyed by opaque UUID
-  and a 10-minute TTL; not yet covered by an automated test — see
-  `docs/limitations.md`); `action_reason` read from the wrong location in
-  Terraform's JSON schema; two resource-address-matching bugs in the chat
-  grounding verifier (indexed and module-qualified addresses, both
-  confirmed with `node -e` against the live regex before fixing); and a
-  policy-predicate path matcher that used substring matching, so a
-  predicate like `"id"` matched paths like `identifier`, producing
-  false-positive policy findings.
-- **Not fixed, deliberately deferred, tracked honestly:** several
-  input-validation and observability hardening items (size/origin/AI-status
-  persistence); a SQLite schema-migration path for existing deployed
-  workspaces predating the policy tables; `bench/` accuracy measurement
-  against a larger real-plan corpus; a held-out policy-compiler evaluation
-  set; a delete-workspace endpoint; a real Workers-runtime integration test
-  harness. Full itemized list with severity and reasoning in
-  `docs/limitations.md`.
+An adversarial review pass found 15 issues. Eight are fixed, most with a
+regression test: an infinite-request loop in the browser client, a
+workspace-identity race on first visit, an S3 rule that missed
+replacements, a policy-confirmation endpoint that trusted a
+client-computable hash instead of a server-issued token, two crashes on
+malformed input, two resource-address bugs in the chat verifier, and a
+policy-predicate matcher that used substring matching and produced false
+positives. The rest is real gaps, tracked and not hidden, in
+`docs/limitations.md`: input-validation hardening, AI call budgets, a
+schema migration path for already-deployed workspaces, a real benchmark
+harness, a delete-workspace endpoint.
 
-## Repository layout
+## Layout
 
 ```
-README.md            this file
-PROMPTS.md            prompt history index
-PLAN.md               the implementation plan this was built from
+README.md               this file
+PROMPTS.md               prompt history index
 wrangler.jsonc
-src/worker.ts          Worker entry: routing, workspace identity, static assets
-src/agent.ts           ReviewAgent: state, HTTP, WebSocket chat
-src/cli.ts             local CLI over the same core
-src/core/               parse, sanitize, rules, graph, analyze — pure TS, no network
-src/ai/                 context building, Workers AI call, grounding verifier
-src/policies/           policy DSL, three-valued interpreter, English-to-rule compiler, proposal hashing
-ui/                     browser client (plain HTML/CSS/JS) + sample plans
-test/                   77 offline unit tests (vitest)
-docs/decisions.md       the actual tradeoffs and why
-docs/limitations.md     what this tool cannot tell you
-prompts/                raw exported prompt history
-scripts/export-prompts.py   the exporter that produced prompts/
+src/worker.ts             Worker entry: routing, workspace identity, static assets
+src/agent.ts              ReviewAgent: state, HTTP, WebSocket chat
+src/cli.ts                local CLI over the same core
+src/core/                  parse, sanitize, rules, graph, analyze — pure TS, no network
+src/ai/                    context building, Workers AI call, grounding verifier
+src/policies/              policy DSL, three-valued interpreter, English-to-rule compiler, proposal hashing
+ui/                        browser client (plain HTML/CSS/JS) + sample plans
+test/                      78 offline unit tests (vitest)
+docs/decisions.md          the actual tradeoffs and why
+docs/limitations.md        what this tool cannot tell you
+prompts/                   raw exported prompt history
+scripts/export-prompts.py  the exporter that produced prompts/
 ```

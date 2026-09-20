@@ -82,12 +82,12 @@ to for the deterministic core. See "Not built in this pass" below.
 
 ## Adversarial-review findings
 
-A concurrent review session (see `SUBMISSION_REVIEW.md` — kept in the repo
-root as the raw record; not a submission artifact itself) inspected this
-codebase, ran real probes against the actual source, and found 15 numbered
-issues (R1–R15). Given the size of that list against remaining build time,
-this pass triaged rather than implementing all of it. What follows is the
-honest disposition of each.
+A structured adversarial review ran against this codebase partway through
+the build: real probes against the actual source and, later, the deployed
+app, not a read-through. It found 15 numbered issues (R1–R15). Given the
+size of that list against remaining build time, this pass triaged rather
+than implementing all of it. What follows is the honest disposition of
+each.
 
 **Fixed this pass, each with a regression test:**
 
@@ -167,27 +167,37 @@ honest disposition of each.
 
 **Confirmed real, not fixed this pass — tracked, not hidden:**
 
-- **R3, R8, R9, R10, R12, R13:** UI truthfulness details (stale cache on
+- **R8 partial:** two crashes were reproduced and fixed — `POST .../review`
+  with a JSON body that parses to `null` (or any non-object) threw instead
+  of returning 400, and a plan whose `configuration.root_module.resources`
+  is an object instead of an array threw `TypeError: resources is not
+  iterable` in the graph builder instead of degrading to "no resources."
+  Both are guarded now (`src/agent.ts`, `src/core/graph.ts`); the graph fix
+  has a regression test, the request-body fix doesn't yet, since exercising
+  it needs the real Durable Object request path (same gap as R7 — see
+  above). The rest of R8 — origin checks, size/depth limits on every
+  request and WS frame, rejecting generic client-state writes — is still
+  open.
+- **R3, R9, R10, R12, R13:** UI truthfulness details (stale cache on
   reconnect, optimistic-append double-counting, unchecked delete
-  responses), input-validation hardening (size/origin/state-write
-  protection), AI-call cost/status persistence, a SQLite migration path for
+  responses), AI-call cost/status persistence, a SQLite migration path for
   already-deployed workspaces with the pre-policy schema, UI evidence-panel
   polish, and a real `bench/` harness with Workers-runtime integration
   tests. Each is a real, legitimate gap the review correctly identified;
   none were reproduced with a failing test or fixed in this pass given
-  remaining time. Treat `SUBMISSION_REVIEW.md` as the authoritative task
-  list if this project continues.
+  remaining time.
 
 This section exists because publishing "everything works" after finding 15
-real issues and fixing only some of them would be dishonest. 8 of the 15
-findings (R1, R2, R4 partial, R5 partial, R6, R7, R11 partial, R15 partial)
-are fixed with regression tests where a Durable Object runtime isn't
-required to exercise them, and documented as untested where it is (R7).
-They were chosen because they were verifiable without deploying, and either
-directly undermined this project's own thesis (S3 rule gap, chat-grounding
-regex, policy false positives) or were an outright functional or security
-gap (the UI loop, the workspace race, the confirmable-without-previewing
-policy hole). The rest are real work, not excuses.
+real issues and fixing only some of them would be dishonest. R1, R2, R4
+(partial), R5 (partial), R6, R7, R8 (partial), R11 (partial), and R15
+(partial) are fixed, most with a regression test — a couple couldn't get
+one without a Durable Object test runtime this project doesn't have yet
+(noted inline above). They were chosen because they either directly
+undermined this project's own thesis (the S3 rule gap, the chat-grounding
+regex bugs, the policy false positives) or were an outright functional or
+security gap (the UI loop, the workspace race, a policy confirmable without
+ever being previewed, two crashes on malformed input). The rest is real
+work, not an excuse.
 
 ## Input limits (may reject a legitimate large plan)
 

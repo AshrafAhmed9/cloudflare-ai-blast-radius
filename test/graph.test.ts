@@ -114,4 +114,13 @@ describe("buildGraph", () => {
     expect(result.edges).toHaveLength(0);
     expect(Object.keys(result.dependents)).toHaveLength(0);
   });
+
+  it("degrades gracefully, not a crash, when resources is an object instead of an array", () => {
+    // Terraform's own format always makes root_module.resources an array,
+    // but this boundary shouldn't trust that a hand-edited or malformed
+    // plan honors the spec. Previously threw "resources is not iterable".
+    const configuration = { root_module: { resources: {} as unknown } };
+    const result = buildGraph(configuration, [fact({ id: "a.b", address: "a.b" })]);
+    expect(result.edges).toHaveLength(0);
+  });
 });

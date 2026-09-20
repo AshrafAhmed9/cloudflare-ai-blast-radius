@@ -1,7 +1,6 @@
 # Decisions
 
-A handful of actual tradeoffs, not a full design log. See `PLAN.md` for the
-requirements and constraints these decisions serve.
+A handful of actual tradeoffs, not a full design log.
 
 ## Why Agent (Durable Object) storage instead of D1
 
@@ -49,16 +48,20 @@ was initially treated as a fatal error rather than a retryable one — see
 `test/policy-compile.test.ts`'s "retries once" case), and refuses cleanly
 when the sentence can't be expressed in the DSL.
 
-Lifecycle, per PLAN.md §6 (propose → validate → preview → confirm →
-persist): `POST /policy/propose` compiles and dry-runs against the selected
-review **without persisting anything**; the client gets back a
-`proposalHash` — a SHA-256 of the exact (sentence, rule) pair
-(`hash.ts`, tested for determinism and for changing when either input
-changes). `POST /policy/confirm` recomputes that hash server-side from what
-the client sends back; a mismatch (the proposal was edited after preview)
-is rejected with 409, not silently accepted. Confirming the same proposal
-twice is idempotent (returns the existing stored policy rather than
-duplicating).
+Lifecycle (propose → validate → preview → confirm → persist): `POST
+/policy/propose` compiles and dry-runs against the selected review
+**without persisting anything**, then stores the compiled (sentence, rule)
+server-side in a `policy_proposals` table under an opaque UUID with a
+10-minute TTL, and hands that id back to the client. `POST /policy/confirm`
+takes only that id — the sentence and rule it persists are read from the
+stored row, never from the client's request body, and the row is deleted on
+use so it can't be confirmed twice. This closed a real gap in an earlier
+version: confirmation used to trust a client-recomputable SHA-256 hash of
+(sentence, rule) rather than a server-issued token, so a client could call
+`/policy/confirm` directly with a self-computed hash and skip the
+compile/dry-run step entirely. `hash.ts`'s `proposalHash` still exists, now
+used only internally to dedupe an already-confirmed policy against a
+resubmission of the identical sentence+rule.
 
 **Snapshot, not live recomputation.** A review's policy findings are
 computed once, against the policies that existed at review-creation time,

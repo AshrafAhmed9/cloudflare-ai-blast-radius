@@ -204,7 +204,11 @@ export class ReviewAgent extends Agent<Env, AgentPublicState> {
       if (text.length > MAX_INPUT_BYTES) {
         return Response.json({ error: `Input exceeds ${MAX_INPUT_BYTES} byte limit.` }, { status: 413 });
       }
-      body = JSON.parse(text);
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        return Response.json({ error: "Request body must be a JSON object: { plan, idempotencyKey, label }." }, { status: 400 });
+      }
+      body = parsed as { plan?: unknown; idempotencyKey?: string; label?: string };
     } catch {
       return Response.json({ error: "Request body must be JSON: { plan, idempotencyKey, label }." }, { status: 400 });
     }
