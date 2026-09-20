@@ -15,10 +15,22 @@ import type { Env } from "./agent.js";
 const COOKIE_NAME = "br_workspace";
 const AGENT_PATH_PREFIX = "/agents/review-agent/";
 
+/** Exact cookie-name parsing: split on "; " and match the key precisely,
+ *  rather than a bare substring regex. R2 (adversarial review) — the
+ *  earlier `cookie.match(/NAME=(...)/)` would also match a cookie whose
+ *  name merely ENDS with "br_workspace" (e.g. a hypothetical
+ *  "other_br_workspace=<64 hex chars>" from some other script on the same
+ *  origin), silently adopting the wrong value. */
 function getWorkspaceIdFromCookie(request: Request): string | null {
-  const cookie = request.headers.get("cookie") ?? "";
-  const match = cookie.match(new RegExp(`${COOKIE_NAME}=([a-f0-9]{64})`));
-  return match ? match[1]! : null;
+  const header = request.headers.get("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const name = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (name === COOKIE_NAME && /^[a-f0-9]{64}$/.test(value)) return value;
+  }
+  return null;
 }
 
 function generateWorkspaceId(): string {
@@ -27,9 +39,33 @@ function generateWorkspaceId(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+function withWorkspaceCookie(response: Response, workspaceId: string): Response {
+  const wrapped = new Response(response.body, response);
+  wrapped.headers.append(
+    "Set-Cookie",
+    `${COOKIE_NAME}=${workspaceId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`,
+  );
+  return wrapped;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // R2 (adversarial review): the client used to open its WebSocket and
+    // fire /reviews + /policies fetches in parallel with no prior request,
+    // so each could independently land cookie-less at the origin and each
+    // generate its OWN random workspace id — splitting one browser session
+    // across multiple Durable Object instances. `/api/bootstrap` exists so
+    // the client can await exactly one request first, guaranteeing the
+    // Set-Cookie round-trip completes before anything else fires. See
+    // ui/app.js's hydrateWorkspace().
+    if (url.pathname === "/api/bootstrap") {
+      const existing = getWorkspaceIdFromCookie(request);
+      const workspaceId = existing ?? generateWorkspaceId();
+      const response = Response.json({ ok: true });
+      return existing ? response : withWorkspaceCookie(response, workspaceId);
+    }
 
     if (url.pathname.startsWith(AGENT_PATH_PREFIX)) {
       let workspaceId = getWorkspaceIdFromCookie(request);
@@ -46,16 +82,13 @@ export default {
 
       const response = await routeAgentRequest(routedRequest, env);
       const finalResponse = response ?? Response.json({ error: "Not found" }, { status: 404 });
-
-      if (isNew) {
-        const withCookie = new Response(finalResponse.body, finalResponse);
-        withCookie.headers.append(
-          "Set-Cookie",
-          `${COOKIE_NAME}=${workspaceId}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`,
-        );
-        return withCookie;
-      }
-      return finalResponse;
+      // Set-Cookie on a WebSocket upgrade response (status 101) is preserved
+      // by `new Response(body, response)` the same way as any other status —
+      // verified via the live WS handshake in docs/decisions.md's live
+      // verification notes. Still, the client's bootstrap-first sequencing
+      // means the WS path should already have a cookie by the time it
+      // connects, so `isNew` here should be rare in practice, not load-bearing.
+      return isNew ? withWorkspaceCookie(finalResponse, workspaceId) : finalResponse;
     }
 
     if (url.pathname === "/api/health") {

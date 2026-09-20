@@ -319,8 +319,6 @@ el.policyProposeBtn.addEventListener("click", async () => {
   });
 });
 
-loadPolicies();
-
 el.chatForm.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = el.chatInput.value.trim();
@@ -330,7 +328,25 @@ el.chatForm.addEventListener("submit", (e) => {
   el.chatInput.value = "";
 });
 
-connectWebSocket();
-hydrateWorkspace().catch(() => {
-  el.status.textContent = "no reviews yet";
-});
+// R2 fix (adversarial review): the WebSocket connection, /reviews fetch,
+// and /policies fetch used to fire independently and in parallel on page
+// load. Each request that arrives at the origin with no cookie yet gets a
+// FRESH random workspace id from the server (see worker.ts) — so three
+// parallel cookie-less requests could split one browser session across
+// three different Durable Object instances. Fixed by awaiting one bootstrap
+// request first (which the browser's Set-Cookie response completes before
+// this function returns), and only then opening the socket and loading
+// workspace data — guaranteeing every subsequent request already carries
+// the same cookie.
+async function bootstrapAndStart() {
+  try {
+    await fetch("/api/bootstrap", { credentials: "same-origin" });
+  } catch {
+    // Even if this fails, proceed — worst case is the pre-fix race,
+    // not a hard failure to load the page.
+  }
+  connectWebSocket();
+  await Promise.all([hydrateWorkspace().catch(() => { el.status.textContent = "no reviews yet"; }), loadPolicies().catch(() => {})]);
+}
+
+bootstrapAndStart();
